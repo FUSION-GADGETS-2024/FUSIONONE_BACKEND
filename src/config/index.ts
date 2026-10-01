@@ -1,0 +1,136 @@
+/**
+ * Configuration: loads, validates, and freezes all application configuration
+ * at startup. Invalid or missing required values cause a hard startup
+ * failure; security-sensitive values never fall back to insecure defaults.
+ */
+import { z } from 'zod';
+
+const ConfigSchema = z.object({
+  nodeEnv: z.enum(['development', 'production', 'test']),
+  port: z.number().int().min(1).max(65535),
+  host: z.string().min(1),
+
+  /** Supabase user-identity access model: publishable key + the requesting
+   *  user's JWT (RLS enforces the data boundary). No secret key exists. */
+  supabaseUrl: z.string().url(),
+  supabasePublishableKey: z.string().min(1),
+
+  /** CORS: allowed browser origins (comma-separated). "*" only for dev sandboxes. */
+  allowedOrigins: z.array(z.string().min(1)).min(1),
+
+  dataDir: z.string().min(1),
+  whatsappAuthDir: z.string().min(1),
+
+  expectedWhatsappJid: z.string().optional().default(''),
+
+  reconnectBaseMs: z.number().int().min(100),
+  reconnectMaxMs: z.number().int().min(1000),
+
+  /** Runtime retention: when the LAST authenticated frontend client
+   *  disconnects and no other runtime demand exists, the runtime keeps
+   *  running for this grace period before the intentional stop (session
+   *  preserved). A client returning within the grace cancels it. */
+  whatsappClientDisconnectGraceMs: z.number().int().min(100),
+
+  /** Bounded wait for a runtime wake to reach CONNECTED. */
+  whatsappWakeTimeoutMs: z.number().int().min(1000),
+
+  /** Redis backup layer (SECONDARY session persistence). Empty = disabled. */
+  redisUrl: z.string().default(''),
+
+  /** Server-side secret encrypting the Redis backup at rest. Required when
+   *  REDIS_URL is set; never exposed to any frontend and never logged. */
+  backupEncryptionKey: z.string().default(''),
+
+  sendTimeoutMs: z.number().int().min(1000),
+  sendMaxRetries: z.number().int().min(0).max(10),
+  sendRetryBaseMs: z.number().int().min(100),
+
+  maxRequestBodyBytes: z.number().int().min(1024),
+
+  shutdownTimeoutMs: z.number().int().min(1000),
+
+  logLevel: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']),
+
+  /** GET /ping probe token (X-Ping-Token header). Empty/unset = /ping fails
+   *  closed (always 401). Environment-only — never shipped to any frontend. */
+  pingToken: z.string().default(''),
+});
+
+export type AppConfig = z.infer<typeof ConfigSchema>;
+
+function parseEnv(): unknown {
+  const num = (v: string | undefined, fallback?: number): number => {
+    if (v === undefined || v === '') return fallback ?? NaN;
+    const n = Number(v);
+    return Number.isNaN(n) ? NaN : n;
+  };
+
+  const str = (v: string | undefined, fallback = ''): string =>
+    v === undefined ? fallback : v;
+
+  return {
+    nodeEnv: str(process.env.NODE_ENV, 'development') as 'development' | 'production' | 'test',
+    port: num(process.env.PORT, 3000),
+    host: str(process.env.HOST, '0.0.0.0'),
+    supabaseUrl: str(process.env.SUPABASE_URL),
+    supabasePublishableKey: str(process.env.SUPABASE_PUBLISHABLE_KEY),
+    allowedOrigins: str(process.env.CLIENT_ORIGIN, 'http://localhost:5173')
+      .split(',')
+      .map((o) => o.trim())
+      .filter((o) => o.length > 0),
+    dataDir: str(process.env.DATA_DIR, './data'),
+    whatsappAuthDir: str(process.env.WHATSAPP_AUTH_DIR, './data/whatsapp/auth'),
+    expectedWhatsappJid: str(process.env.EXPECTED_WHATSAPP_JID, ''),
+    reconnectBaseMs: num(process.env.RECONNECT_BASE_MS, 1000),
+    reconnectMaxMs: num(process.env.RECONNECT_MAX_MS, 60000),
+    whatsappClientDisconnectGraceMs: num(process.env.WHATSAPP_CLIENT_DISCONNECT_GRACE_MS, 300_000),
+    whatsappWakeTimeoutMs: num(process.env.WHATSAPP_WAKE_TIMEOUT_MS, 20_000),
+    redisUrl: str(process.env.REDIS_URL, ''),
+    backupEncryptionKey: str(process.env.WHATSAPP_BACKUP_ENCRYPTION_KEY, ''),
+    sendTimeoutMs: num(process.env.SEND_TIMEOUT_MS, 30000),
+    sendMaxRetries: num(process.env.SEND_MAX_RETRIES, 3),
+    sendRetryBaseMs: num(process.env.SEND_RETRY_BASE_MS, 2000),
+    maxRequestBodyBytes: num(process.env.MAX_REQUEST_BODY_BYTES, 10485760),
+    shutdownTimeoutMs: num(process.env.SHUTDOWN_TIMEOUT_MS, 15000),
+    logLevel: str(process.env.LOG_LEVEL, 'info') as AppConfig['logLevel'],
+    pingToken: str(process.env.PING_TOKEN, ''),
+  };
+}
+
+let _config: AppConfig | null = null;
+
+export function loadConfig(): AppConfig {
+  const raw = parseEnv();
+
+  const result = ConfigSchema.safeParse(raw);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `  - ${i.path.join('.')}: ${i.message}`)
+      .join('\n');
+    throw new Error(`Invalid configuration:\n${issues}`);
+  }
+
+  const cfg = result.data;
+
+  if (cfg.reconnectBaseMs >= cfg.reconnectMaxMs) {
+    throw new Error('RECONNECT_BASE_MS must be less than RECONNECT_MAX_MS');
+  }
+
+  // Session material must never rest in Redis as plaintext.
+  if (cfg.redisUrl.length > 0 && cfg.backupEncryptionKey.length < 16) {
+    throw new Error(
+      'WHATSAPP_BACKUP_ENCRYPTION_KEY must be set (at least 16 characters) when REDIS_URL is configured',
+    );
+  }
+
+  _config = Object.freeze({ ...cfg });
+  return _config;
+}
+
+export function getConfig(): AppConfig {
+  if (!_config) {
+    return loadConfig();
+  }
+  return _config;
+}

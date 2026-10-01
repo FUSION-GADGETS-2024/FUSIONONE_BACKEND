@@ -1,0 +1,245 @@
+/**
+ * Invoice repository — authoritative Supabase data access.
+ *
+ * Loads everything required to render and send an invoice from the
+ * database, keyed ONLY by invoice id + type. Every query runs under the
+ * REQUESTING USER's JWT with the project's publishable key (`Supabase +
+ * user JWT + RLS`): an authenticated user can only load invoices their own
+ * store owns. No secret/service key exists in this service.
+ *
+ * Only the tables needed for invoice rendering/sending are queried.
+ */
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { getConfig } from '../config/index.js';
+import { AppError, ErrorCode } from '../errors/registry.js';
+import type { WhatsAppSettingsRow } from './delivery.js';
+
+/** Cached user-scoped clients (one per access token, LRU-bounded). */
+const userClients = new Map<string, SupabaseClient>();
+const USER_CLIENT_MAX = 16;
+
+/**
+ * Create (or reuse) a Supabase client running under the requesting user's
+ * identity — publishable key + the user's Bearer JWT. RLS applies to every
+ * query made through this client.
+ */
+function getSupabaseForUser(accessToken: string): SupabaseClient {
+  let client = userClients.get(accessToken);
+  if (!client) {
+    const cfg = getConfig();
+    client = createClient(cfg.supabaseUrl, cfg.supabasePublishableKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    });
+    if (userClients.size >= USER_CLIENT_MAX) {
+      // Drop the oldest entry (Map preserves insertion order).
+      const oldest = userClients.keys().next().value;
+      if (oldest) userClients.delete(oldest);
+    }
+    userClients.set(accessToken, client);
+  }
+  return client;
+}
+
+/**
+ * Resolve THE store for the authenticated user. RLS already scopes the read
+ * to the owner; the selection semantics stay explicit: no row = not
+ * configured, more than one = ambiguous.
+ */
+async function resolveStore(db: SupabaseClient): Promise<any> {
+  const { data, error } = await db.from('store').select('*');
+
+  if (error) {
+    throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+      message: 'Failed to load the store configuration.',
+      internalDetails: { step: 'store.select', pgError: error.message },
+    });
+  }
+
+  if (!data || data.length === 0) {
+    throw new AppError(ErrorCode.STORE_NOT_CONFIGURED);
+  }
+  if (data.length > 1) {
+    throw new AppError(ErrorCode.STORE_CONFIGURATION_AMBIGUOUS, {
+      internalDetails: { storeCount: data.length },
+    });
+  }
+  return data[0];
+}
+
+/** Load whatsapp_settings for the store owner. Returns null when absent. */
+async function loadWhatsAppSettings(store: any, db: SupabaseClient): Promise<WhatsAppSettingsRow | null> {
+  const ownerId = store?.owner_user_id;
+  if (!ownerId) return null;
+
+  const { data, error } = await db
+    .from('whatsapp_settings')
+    .select(
+      'owner_user_id, auto_send_sale, auto_send_purchase, auto_send_proforma, ' +
+        'sale_message_template, purchase_message_template, proforma_message_template',
+    )
+    .eq('owner_user_id', ownerId)
+    .maybeSingle();
+
+  if (error) {
+    throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+      message: 'Failed to load WhatsApp delivery settings.',
+      internalDetails: { step: 'whatsapp_settings.select', pgError: error.message },
+    });
+  }
+  return (data as WhatsAppSettingsRow | null) ?? null;
+}
+
+/** PostgREST returns no row for a missing id — map that to INVOICE_NOT_FOUND. */
+function requireRow<T>(row: T | null, invoiceId: string): T {
+  if (!row) {
+    throw new AppError(ErrorCode.INVOICE_NOT_FOUND, {
+      internalDetails: { invoiceId },
+    });
+  }
+  return row;
+}
+
+export interface SaleInvoiceRows {
+  sale: any;
+  items: any[];
+  tradeIns: any[];
+  store: any;
+  whatsappSettings: WhatsAppSettingsRow | null;
+}
+
+export async function loadSaleInvoice(invoiceId: string, accessToken: string): Promise<SaleInvoiceRows> {
+  const db = getSupabaseForUser(accessToken);
+
+  const [saleRes, itemsRes, tradeInsRes, store] = await Promise.all([
+    db.from('sales').select('*, parties (name, number, address)').eq('id', invoiceId).maybeSingle(),
+    db
+      .from('sale_items')
+      .select('sold_price, inventory_item_id, inventory_items (brand, model, imei, ram_rom, color, base_selling_price)')
+      .eq('sale_id', invoiceId),
+    db.from('trade_ins').select('brand, model, imei, ram_rom, color, credit_value, mrp').eq('sale_id', invoiceId),
+    resolveStore(db),
+  ]);
+
+  if (saleRes.error) {
+    throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+      message: 'Failed to load the sale invoice.',
+      internalDetails: { step: 'sales.select', pgError: saleRes.error.message },
+    });
+  }
+  if (itemsRes.error) {
+    throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+      message: 'Failed to load the sale invoice items.',
+      internalDetails: { step: 'sale_items.select', pgError: itemsRes.error.message },
+    });
+  }
+  if (tradeInsRes.error) {
+    throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+      message: 'Failed to load the sale trade-ins.',
+      internalDetails: { step: 'trade_ins.select', pgError: tradeInsRes.error.message },
+    });
+  }
+
+  const sale = requireRow(saleRes.data, invoiceId);
+  const whatsappSettings = await loadWhatsAppSettings(store, db);
+
+  return {
+    sale,
+    items: itemsRes.data ?? [],
+    tradeIns: tradeInsRes.data ?? [],
+    store,
+    whatsappSettings,
+  };
+}
+
+export interface PurchaseInvoiceRows {
+  purchase: any;
+  items: any[];
+  store: any;
+  whatsappSettings: WhatsAppSettingsRow | null;
+}
+
+export async function loadPurchaseInvoice(invoiceId: string, accessToken: string): Promise<PurchaseInvoiceRows> {
+  const db = getSupabaseForUser(accessToken);
+
+  const [purchaseRes, itemsRes, store] = await Promise.all([
+    db.from('purchases').select('*, parties (name, number, address)').eq('id', invoiceId).maybeSingle(),
+    db
+      .from('purchase_items')
+      .select('inventory_items (brand, model, imei, ram_rom, color, purchase_price)')
+      .eq('purchase_id', invoiceId),
+    resolveStore(db),
+  ]);
+
+  if (purchaseRes.error) {
+    throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+      message: 'Failed to load the purchase bill.',
+      internalDetails: { step: 'purchases.select', pgError: purchaseRes.error.message },
+    });
+  }
+  if (itemsRes.error) {
+    throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+      message: 'Failed to load the purchase bill items.',
+      internalDetails: { step: 'purchase_items.select', pgError: itemsRes.error.message },
+    });
+  }
+
+  const purchase = requireRow(purchaseRes.data, invoiceId);
+  const whatsappSettings = await loadWhatsAppSettings(store, db);
+
+  return {
+    purchase,
+    items: itemsRes.data ?? [],
+    store,
+    whatsappSettings,
+  };
+}
+
+export interface ProformaInvoiceRows {
+  proforma: any;
+  items: any[];
+  tradeIns: any[];
+  store: any;
+  whatsappSettings: WhatsAppSettingsRow | null;
+}
+
+export async function loadProformaInvoice(invoiceId: string, accessToken: string): Promise<ProformaInvoiceRows> {
+  const db = getSupabaseForUser(accessToken);
+
+  const [proformaRes, itemsRes, tradeInsRes, store] = await Promise.all([
+    db.from('proforma_invoices').select('*, parties (name, number, address)').eq('id', invoiceId).maybeSingle(),
+    db.from('proforma_invoice_items').select('description, qty, rate, discount, value').eq('proforma_invoice_id', invoiceId),
+    db.from('proforma_trade_ins').select('description, qty, rate, value').eq('proforma_invoice_id', invoiceId),
+    resolveStore(db),
+  ]);
+
+  if (proformaRes.error) {
+    throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+      message: 'Failed to load the quotation.',
+      internalDetails: { step: 'proforma_invoices.select', pgError: proformaRes.error.message },
+    });
+  }
+  if (itemsRes.error) {
+    throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+      message: 'Failed to load the quotation items.',
+      internalDetails: { step: 'proforma_invoice_items.select', pgError: itemsRes.error.message },
+    });
+  }
+  if (tradeInsRes.error) {
+    throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+      message: 'Failed to load the quotation trade-ins.',
+      internalDetails: { step: 'proforma_trade_ins.select', pgError: tradeInsRes.error.message },
+    });
+  }
+
+  const proforma = requireRow(proformaRes.data, invoiceId);
+  const whatsappSettings = await loadWhatsAppSettings(store, db);
+
+  return {
+    proforma,
+    items: itemsRes.data ?? [],
+    tradeIns: tradeInsRes.data ?? [],
+    store,
+    whatsappSettings,
+  };
+}
