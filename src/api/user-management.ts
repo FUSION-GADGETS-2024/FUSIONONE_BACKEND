@@ -44,6 +44,8 @@ interface ManagedUserRow {
 export interface ManagedUserView {
   id: string;
   email: string | null;
+  /** Personal display name (public.users.display_name; null = not set yet). */
+  displayName: string | null;
   userType: 'user';
   status: 'active' | 'blocked';
   emailConfirmed: boolean;
@@ -198,7 +200,7 @@ export async function listManagedUsers(): Promise<ManagedUserView[]> {
 
   const appRes = await admin
     .from('users')
-    .select('id, user_type, status, created_at')
+    .select('id, user_type, status, created_at, display_name')
     .eq('user_type', 'user');
   if (appRes.error) {
     throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
@@ -210,6 +212,7 @@ export async function listManagedUsers(): Promise<ManagedUserView[]> {
     id: string;
     status?: unknown;
     created_at?: string | null;
+    display_name?: string | null;
   }[];
   if (rows.length === 0) return [];
 
@@ -225,6 +228,7 @@ export async function listManagedUsers(): Promise<ManagedUserView[]> {
     users.push({
       id: authUser.id,
       email: authUser.email ?? null,
+      displayName: typeof row.display_name === 'string' ? row.display_name : null,
       userType: 'user',
       status,
       emailConfirmed,

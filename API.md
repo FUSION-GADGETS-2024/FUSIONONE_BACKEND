@@ -655,6 +655,7 @@ Authorization: Bearer <Supabase access token>
     {
       "id": "7a3ed254-8c15-4e83-aa3d-0add1c507bd9",
       "email": "user@fusionone.test",
+      "displayName": "Wamiq Khan",
       "userType": "user",
       "status": "active",
       "emailConfirmed": true,
@@ -667,7 +668,10 @@ Authorization: Bearer <Supabase access token>
 ```
 
 `status` is the account access state (`active` | `blocked`), independent of
-the role. `state` is the derived presentation state: `active` (verified +
+the role. `displayName` is the personal profile name from
+`public.users.display_name` (`null` when the user has not completed their
+profile — never generated from the email, never an authorization signal).
+`state` is the derived presentation state: `active` (verified +
 active), `blocked`, or `invitation_pending` (invited, email not yet
 confirmed).
 
