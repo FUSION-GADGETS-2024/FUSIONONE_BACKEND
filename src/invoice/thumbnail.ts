@@ -2,39 +2,29 @@
  * Invoice thumbnail generator (WhatsApp document preview) — Canvas worker.
  *
  * ARCHITECTURE (the thumbnail is NOT derived from the rendered PDF):
- *
  *   InvoiceData ──┬─→ PDFKit        → PDF buffer      (invoice/pdf.ts)
  *                 └─→ Canvas worker → JPEG thumbnail  (this module)
  *
  * The thumbnail renders the UPPER SECTION of the same Prestige design straight
  * from the canonical InvoiceData (never raw DB rows, never re-calculated
- * totals, never a re-parsed PDF). Colors, layout geometry, column widths,
- * fonts sizes, labels and icons are the shared constants from prestige.ts,
+ * totals, never a re-parsed PDF). The shared constants from prestige.ts are
  * serialized into the worker environment — one visual source of truth.
  *
- * PERSISTENT WORKER: a single plain-Node child process is spawned once,
- * loads @napi-rs/canvas + fonts ONCE, reports readiness, and then serves
- * an unlimited number of thumbnail jobs over stdin/stdout:
- *
+ * PERSISTENT WORKER: a single plain-Node child process is spawned once, loads
+ * @napi-rs/canvas + fonts ONCE, reports readiness, then serves unlimited
+ * thumbnail jobs over stdin/stdout:
  *   parent → worker : one JSON line per job  {"id":N,"data":InvoiceData}
- *   worker → parent : {"t":"ready"} line, then per job:
- *                     {"id":N,"ok":true,...,"jpegLen":K}\n + K raw JPEG bytes
- *                     (or {"id":N,"ok":false,"error":"..."} on failure)
+ *   worker → parent : {"t":"ready"}, then per job {"id":N,"ok":true,...,"jpegLen":K}\n
+ *                     + K raw JPEG bytes (or {"id":N,"ok":false,"error":"..."})
  *
  * WHY A SEPARATE NODE PROCESS: the backend runs under Bun and the
  * @napi-rs/canvas native binding hard-crashes the Bun runtime (verified in
- * this sandbox). The worker therefore always runs under plain Node, outside
- * the Bun process — crash-isolated by construction.
- *
- * CRASH/FAILURE SEMANTICS (the thumbnail is purely cosmetic):
- *   - worker crash  → pending jobs resolve null, worker restarts lazily on
- *     the next request (the backend and the WhatsApp state machine are
- *     unaffected)
- *   - job timeout   → job resolves null, hung worker is killed and replaced
- *   - ANY thumbnail failure → the caller sends the invoice PDF WITHOUT a
- *     preview (never blocks the send)
- *
- * NO FILESYSTEM I/O: InvoiceData → Canvas → JPEG buffer, entirely in memory.
+ * this sandbox) — the worker runs under plain Node, crash-isolated by
+ * construction. Crash/failure semantics (the thumbnail is purely cosmetic):
+ * worker crash → pending jobs resolve null, worker restarts lazily; job
+ * timeout → job resolves null, hung worker killed and replaced; ANY failure →
+ * the invoice is sent PDF-only, never blocked. No filesystem I/O — entirely
+ * in memory.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';

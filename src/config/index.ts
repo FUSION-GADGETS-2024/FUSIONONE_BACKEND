@@ -29,7 +29,6 @@ const ConfigSchema = z.object({
   /** CORS: allowed browser origins (comma-separated). "*" only for dev sandboxes. */
   allowedOrigins: z.array(z.string().min(1)).min(1),
 
-  dataDir: z.string().min(1),
   whatsappAuthDir: z.string().min(1),
 
   expectedWhatsappJid: z.string().optional().default(''),
@@ -58,8 +57,6 @@ const ConfigSchema = z.object({
   sendRetryBaseMs: z.number().int().min(100),
 
   maxRequestBodyBytes: z.number().int().min(1024),
-
-  shutdownTimeoutMs: z.number().int().min(1000),
 
   logLevel: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']),
 
@@ -92,7 +89,6 @@ function parseEnv(): unknown {
       .split(',')
       .map((o) => o.trim())
       .filter((o) => o.length > 0),
-    dataDir: str(process.env.DATA_DIR, './data'),
     whatsappAuthDir: str(process.env.WHATSAPP_AUTH_DIR, './data/whatsapp/auth'),
     expectedWhatsappJid: str(process.env.EXPECTED_WHATSAPP_JID, ''),
     reconnectBaseMs: num(process.env.RECONNECT_BASE_MS, 1000),
@@ -105,7 +101,6 @@ function parseEnv(): unknown {
     sendMaxRetries: num(process.env.SEND_MAX_RETRIES, 3),
     sendRetryBaseMs: num(process.env.SEND_RETRY_BASE_MS, 2000),
     maxRequestBodyBytes: num(process.env.MAX_REQUEST_BODY_BYTES, 10485760),
-    shutdownTimeoutMs: num(process.env.SHUTDOWN_TIMEOUT_MS, 15000),
     logLevel: str(process.env.LOG_LEVEL, 'info') as AppConfig['logLevel'],
     pingToken: str(process.env.PING_TOKEN, ''),
   };

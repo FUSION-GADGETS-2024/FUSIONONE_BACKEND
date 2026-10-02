@@ -1,15 +1,12 @@
 /**
  * Send Controller — the transport stage of the sendInvoice operation.
- *
  * Serializes send operations (concurrency = 1), enforces the send timeout,
  * retries transient failures with bounded backoff, maps failures into the
- * canonical error registry, and emits SEND_INVOICE_RESULT events. The
- * invoice composition (Supabase load → InvoiceData → template → PDF) happens
- * in invoice/send.ts BEFORE this controller is invoked; it receives the
- * finished PDF buffer + caption and performs the WhatsApp document send.
- *
- * The controller does not create, store, or persist invoices and does not
- * cache PDF/caption data — after a send settles, all references are released.
+ * canonical error registry, and emits SEND_INVOICE_RESULT events. Invoice
+ * composition (Supabase load → InvoiceData → template → PDF) happens in
+ * invoice/send.ts BEFORE this controller is invoked. The controller never
+ * creates, stores, or persists invoices — after a send settles, all
+ * references are released.
  */
 import { getConfig } from '../config/index.js';
 import { getLogger } from '../logging/logger.js';
@@ -89,8 +86,8 @@ export class SendController {
 
     try {
       // Wake-on-demand: a valid idle session is woken here — the user never
-      // has to return to Settings and press Connect. Without a session this
-      // resolves to the canonical "connection required" error (never pairs).
+      // has to press Connect first. Without a session this resolves to the
+      // canonical "connection required" error (never pairs).
       if (this.whatsappManager) {
         await this.whatsappManager.ensureReadyForSend();
       }
@@ -209,7 +206,7 @@ export class SendController {
   /**
    * Send a single attempt with a timeout. The timer is ALWAYS cleared when
    * the race settles — a successful send must not leave a 30-second timer
-   * alive (it would pin the event loop and delay idle shutdown).
+   * alive (it would pin the event loop).
    */
   private async sendWithTimeout(
     recipient: string,

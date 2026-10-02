@@ -74,7 +74,7 @@ function buildLogger(): Logger {
       },
     },
     base: {
-      service: 'whatsapp-invoice-backend',
+      service: 'fusion-one-backend',
       pid: process.pid,
     },
   };

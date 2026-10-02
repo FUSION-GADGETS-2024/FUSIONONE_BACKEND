@@ -1,10 +1,8 @@
 /**
  * Application — wires the components together and owns the process
- * lifecycle: state machine, managers, API server, watchdog, warmups,
- * signal handlers, and graceful shutdown.
- *
- * The backend owns the complete WhatsApp lifecycle; the frontend is
- * primarily a reader of backend state.
+ * lifecycle: state machine, managers, API server, watchdog, warmups, signal
+ * handlers, and graceful shutdown. The backend owns the complete WhatsApp
+ * lifecycle; the frontend is primarily a reader of backend state.
  */
 import { getConfig } from './config/index.js';
 import { getLogger } from './logging/logger.js';
@@ -108,10 +106,10 @@ export class Application {
     void warmupThumbnailWorker().catch(() => { /* never fatal */ });
 
     // Boot: STARTING → IDLE, session dimension resynced from disk. The
-    // runtime is demand-driven — it wakes when the first authenticated
-    // client appears (or an operation needs it) and sleeps 5 minutes after
-    // the last client leaves. A persisted session lands as IDLE + PRESENT
-    // (reusable without QR). The server is fully operational while IDLE.
+    // runtime is demand-driven — it wakes when the first authenticated client
+    // appears (or an operation needs it) and sleeps after the last client
+    // leaves. A persisted session lands as IDLE + PRESENT (reusable without
+    // QR); the server is fully operational while IDLE.
     await this.sessionManager.resyncSessionDimension();
     this.stateMachine.transition(WhatsAppState.IDLE);
 
@@ -132,8 +130,8 @@ export class Application {
    * Graceful shutdown. CRITICAL: normal shutdown MUST NOT wipe the WhatsApp
    * session — a restart must be able to restore it. Order: mark shutting
    * down + STOPPING → cancel active sends (bounded) → stop the thumbnail
-   * worker → stop Baileys (socket closed, session PRESERVED) → close SSE →
-   * stop watchdog → close HTTP → close the Redis backup client → exit.
+   * worker → stop Baileys (session PRESERVED) → close SSE → stop watchdog →
+   * close HTTP → close the Redis backup client → exit.
    */
   async shutdown(signal: string): Promise<void> {
     if (this.isShuttingDown) {

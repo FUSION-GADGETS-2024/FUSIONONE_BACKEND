@@ -1,26 +1,9 @@
 /**
- * API Server — Fastify with all application routes:
- * - GET  /ping                       — token-protected wakeup probe (cron)
- * - GET  /api/status                 — current WhatsApp state      [app user]
- * - GET  /api/events                 — SSE event stream (presence) [app user]
- * - POST /api/whatsapp/login         — start login / re-pair        [owner]
- * - POST /api/whatsapp/cancelPairing — cancel an active pairing    [app user]
- * - POST /api/whatsapp/sendInvoice   — send an invoice PDF          [app user]
- * - POST /api/whatsapp/logout        — logout and destroy session   [owner]
- * - GET  /api/users                  — list managed users           [owner]
- * - POST /api/users/invite           — invite a new user by email   [owner]
- * - POST /api/users/:id/resend-invite — resend pending invitation   [owner]
- * - POST /api/users/:id/block        — block a user                 [owner]
- * - POST /api/users/:id/unblock      — unblock a user               [owner]
- * - POST /api/users/:id/reset-password — send native recovery email [owner]
- * - DELETE /api/users/:id            — permanently remove account   [owner]
- * - GET  /health/live, /health/ready — probes
- * - GET  /                            — service banner
- *
- * "[app user]" = verified + provisioned FUSION ONE user (owner or user);
- * "[owner]" = the single application owner. Every /api route first passes
- * the JWT authentication hook, then the explicit application-authorization
- * check — a valid JWT alone never suffices anymore.
+ * API Server — Fastify with all application routes. Route-level
+ * authorization: "[app user]" = verified + provisioned FUSION ONE user
+ * (owner or user); "[owner]" = owner only. Every /api route passes the JWT
+ * authentication hook (api/auth.ts) and then an explicit application-
+ * authorization check — a valid JWT alone never suffices.
  */
 import Fastify, {
   type FastifyInstance,
@@ -67,9 +50,8 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
     bodyLimit: cfg.maxRequestBodyBytes,
   });
 
-  // CORS: only the configured CLIENT_ORIGIN list is allowed (checked
-  // per-request). No wildcard in production — the API uses Bearer tokens,
-  // not cookies, so credentials mode stays disabled.
+  // CORS: only the configured CLIENT_ORIGIN list is allowed. No wildcard in
+  // production — the API uses Bearer tokens, not cookies.
   await app.register(cors, {
     origin: (origin, cb) => {
       if (
@@ -90,10 +72,9 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
   app.addHook('preHandler', authHook);
 
   // Bodyless API calls: several endpoints (block/unblock/reset/remove) take
-  // their target from the URL and their actor from the JWT — no request body.
-  // A client that still declares Content-Type: application/json with an empty
-  // body must not fail parsing; treat an empty body as "no body" (standard
-  // Fastify recipe). Malformed JSON still fails as 400.
+  // their target from the URL and their actor from the JWT — an empty body
+  // with Content-Type: application/json must not fail parsing. Malformed
+  // JSON still fails as 400 (standard Fastify recipe).
   app.addContentTypeParser(
     'application/json',
     { parseAs: 'string' },
@@ -111,21 +92,14 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
     },
   );
 
-  // Error handler: never expose raw internal errors.
+  // Error handler: AppError passes through as-is; Fastify-native errors map
+  // to canonical registry codes; unknown errors never expose raw internals.
   app.setErrorHandler((err: unknown, req: FastifyRequest, reply: FastifyReply) => {
     const appError = toAppError(err);
 
-    // AppError passes through as-is (checked FIRST so registered
-    // codes/messages are preserved).
     if (err instanceof AppError) {
       getLogger().error(
-        {
-          err: err.message,
-          errorCode: err.code,
-          internalDetails: err.internalDetails,
-          url: req.url,
-          method: req.method,
-        },
+        { err: err.message, errorCode: err.code, internalDetails: err.internalDetails, url: req.url, method: req.method },
         'Request error',
       );
       reply.code(err.statusCode).send(err.toJSON());
@@ -185,14 +159,13 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
   // GET / — service banner (headless API; the SPA talks to it cross-origin).
   app.get('/', async () => {
     return {
-      service: 'whatsapp-invoice-backend',
+      service: 'fusion-one-backend',
       version: '1.0.0',
       status: 'running',
     };
   });
 
-  // GET /health/live — the Node process is alive (never fails because
-  // WhatsApp is temporarily disconnected).
+  // GET /health/live — the Node process is alive.
   app.get('/health/live', async () => {
     return { status: 'alive', timestamp: new Date().toISOString() };
   });
@@ -220,9 +193,9 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
   });
 
   // GET /ping — token-protected wakeup probe for external cron/monitoring.
-  // Deliberately outside the JWT model: never touches Supabase, the
-  // database, Baileys, the session, or the state machine. Fail closed:
-  // missing/incorrect token — or an unset PING_TOKEN — always returns 401.
+  // Deliberately outside the JWT model: never touches Supabase, Baileys, the
+  // session, or the state machine. Fails closed (401) when PING_TOKEN is
+  // unset or the header does not match.
   app.get('/ping', async (req: FastifyRequest, reply: FastifyReply) => {
     const expected = cfg.pingToken;
     const provided = req.headers['x-ping-token'];
@@ -240,11 +213,11 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
     reply.code(204).send();
   });
 
-  // GET /api/status — runtime state and the session dimension reported as
-  // two SEPARATE axes (IDLE + PRESENT = asleep but reusable; IDLE + NONE =
-  // nothing paired). Reading status is not WhatsApp activity — it never
-  // influences runtime retention. The QR fields carry the full QR lifecycle
-  // so a freshly mounted panel renders the QR and its countdown immediately.
+  // GET /api/status — runtime state and the session dimension as two
+  // SEPARATE axes (IDLE + PRESENT = asleep but reusable; IDLE + NONE =
+  // nothing paired). Reading status is not WhatsApp activity. The QR fields
+  // carry the full QR lifecycle so a freshly mounted panel renders
+  // immediately.
   app.get('/api/status', async (req: FastifyRequest) => {
     await requireAuthorizedUser(req);
     const state = deps.stateMachine.state;
@@ -269,11 +242,8 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
   });
 
   // GET /api/events — the authenticated SSE stream. Each live stream is a
-  // PRESENT frontend client: it feeds the client-presence tracker (automatic
-  // wake on the first client, shutdown grace after the last). The route's
-  // presence bookkeeping uses the raw socket 'close' event — the canonical
-  // disconnect signal that always fires eventually — separate from the
-  // SSEManager's own registry.
+  // PRESENT frontend client (feeds the presence tracker: automatic wake on
+  // the first client, shutdown grace after the last).
   app.get('/api/events', async (req: FastifyRequest, reply: FastifyReply) => {
     // Authorized app users only — unverified / unprovisioned identities must
     // not observe the shared WhatsApp runtime state.
@@ -288,12 +258,9 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
   });
 
   // POST /api/whatsapp/login — the EXPLICIT user action (Connect button):
-  // the only way to start QR pairing. Owner-only: connecting the shared
-  // WhatsApp account is store-level configuration. Candidate resolution runs
+  // the only way to start QR pairing (owner-only). Candidate resolution runs
   // first — a reusable session (local, or recovered from Redis) connects
-  // WITHOUT a QR; pairing only begins when no reusable session exists
-  // anywhere. The server NEVER auto-pairs (presence/sendInvoice wake with
-  // 'wake' intent).
+  // WITHOUT a QR. The server NEVER auto-pairs.
   app.post('/api/whatsapp/login', async (req: FastifyRequest, reply: FastifyReply) => {
     await requireOwner(req);
     await deps.whatsappManager.startLogin();
@@ -306,14 +273,11 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
     });
   });
 
-  // POST /api/whatsapp/cancelPairing — the pairing dialog's explicit
-  // Close/Cancel. Cancels an ACTIVE pairing (stops the QR runtime, discards
-  // unvalidated residue, converges to IDLE + NONE). NOT logout: a validated
-  // session (CONNECTED, or a scan already in CONNECTING) is preserved — the
-  // cancel-vs-scan race is resolved by the lifecycle's state dispatch.
-  // Available to any authorized app user: it only discards an INCOMPLETE
-  // pairing and is idempotent, so the global dialog stays dismissible for
-  // everyone while the runtime itself remains shared and untouched.
+  // POST /api/whatsapp/cancelPairing — cancels an ACTIVE pairing (stops the
+  // QR runtime, discards unvalidated residue, converges to IDLE + NONE).
+  // NOT logout: a validated session is preserved — the cancel-vs-scan race
+  // is resolved by the lifecycle's state dispatch. Idempotent; available to
+  // any authorized app user.
   app.post('/api/whatsapp/cancelPairing', async (req: FastifyRequest, reply: FastifyReply) => {
     await requireAuthorizedUser(req);
     await deps.whatsappManager.cancelPairing();
@@ -327,12 +291,11 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
   });
 
   // POST /api/whatsapp/sendInvoice — send an invoice by reference
-  // {invoiceId, invoiceType, requestId?}. The backend loads the
-  // authoritative invoice from Supabase (under the VERIFIED user's JWT —
-  // identity never comes from the body), renders the PDF, resolves recipient
-  // + template, and sends ONE WhatsApp document message with the caption.
-  // The legacy image-based contract ({recipient, image, caption}) is rejected.
-  // Any authorized app user may send (shared business operation).
+  // {invoiceId, invoiceType, requestId?}. The backend loads the authoritative
+  // invoice from Supabase (under the VERIFIED user's JWT — identity never
+  // comes from the body), renders the PDF, and sends ONE WhatsApp document
+  // message. The legacy image-based contract is rejected. Any authorized app
+  // user may send.
   app.post('/api/whatsapp/sendInvoice', async (req: FastifyRequest, reply: FastifyReply) => {
     const user = await requireAuthorizedUser(req);
     const input = parseSendInvoiceRequest(req.body);
@@ -343,11 +306,8 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
   });
 
   // POST /api/whatsapp/logout — destroy the session (fail closed).
-  // Owner-only: destroying the SHARED WhatsApp session is store-level
-  // configuration. Meaningful whenever session material exists (an IDLE
-  // runtime with a stored session CAN be logged out); PAIRING has no session
-  // to destroy. After logout the runtime stays IDLE + NONE until an explicit
-  // login.
+  // Owner-only. Meaningful whenever session material exists; after logout
+  // the runtime stays IDLE + NONE until an explicit login.
   app.post('/api/whatsapp/logout', async (req: FastifyRequest, reply: FastifyReply) => {
     await requireOwner(req);
     const state = deps.stateMachine.state;

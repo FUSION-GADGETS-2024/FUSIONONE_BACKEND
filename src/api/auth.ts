@@ -2,9 +2,9 @@
  * API authentication — Supabase user JWTs.
  *
  *   request → extract Bearer token → verify cryptographically against the
- *   project's JWKS (ES256; issuer + audience checked) → authorize under the
- *   verified identity (sub claim). The user's identity ALWAYS comes from the
- *   verified JWT — never from userId/ownerId/storeId fields in a body.
+ *   project's JWKS (ES256/RS256; issuer + audience checked) → authorize under
+ *   the verified identity (sub claim). Identity ALWAYS comes from the
+ *   verified JWT — never from request-body fields.
  *
  * Every /api/* endpoint requires a valid user JWT. /health/*, / and /ping
  * stay outside this model (/ping carries its own X-Ping-Token check).
@@ -71,11 +71,9 @@ export async function verifySupabaseToken(token: string): Promise<AuthenticatedU
     }
     const email =
       typeof payload.email === 'string' ? payload.email : null;
-    // Authentication context from the verified claims: amr[0].method is
-    // 'password' for a normal application login and 'otp' for an
-    // invitation/recovery (email-link) session — the claim Supabase issues
-    // and preserves across token refresh (verified live against the TEST
-    // project). Absent claim → null → treated as non-password downstream.
+    // amr[0].method from the VERIFIED claims: 'password' = normal application
+    // login, 'otp' = invitation/recovery email-link session, null → fail
+    // closed downstream. Stable across token refresh (verified live).
     const amr = Array.isArray(payload.amr) ? payload.amr : null;
     const amrMethod =
       amr && typeof amr[0] === 'object' && amr[0] !== null && typeof (amr[0] as { method?: unknown }).method === 'string'

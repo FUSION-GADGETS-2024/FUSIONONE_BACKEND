@@ -1,14 +1,11 @@
 /**
- * Entry point
- *
- * Starts the WhatsApp invoice backend application.
+ * Entry point — starts the FUSION ONE backend application.
  */
 import { loadConfig } from './config/index.js';
 import { Application } from './app.js';
 
 async function main(): Promise<void> {
-  // Load and validate configuration (fails fast on invalid config)
-  loadConfig();
+  loadConfig(); // fails fast on invalid config
 
   const app = new Application();
   await app.start();

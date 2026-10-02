@@ -2,7 +2,7 @@
  * Security Manager — the central authority for security decisions and
  * fail-closed security invalidation.
  *
- * Invariants enforced (the numbered list of the original spec):
+ * Invariants enforced:
  *   1. The frontend cannot directly control Baileys (no such endpoints)
  *   2. Only WhatsAppManager owns the socket
  *   3. Only SessionManager destroys authentication state
@@ -55,7 +55,7 @@ export class SecurityManager {
 
   /**
    * Fail-closed security invalidation: block sends → SECURITY_INVALIDATED →
-   * SECURITY_EVENT → destroySession (which settles to IDLE with NO session).
+   * SECURITY_EVENT → destroySession (settles to IDLE with NO session).
    * Baileys stays off; only an explicit POST /api/whatsapp/login starts a
    * new session — the socket is never re-created here.
    */

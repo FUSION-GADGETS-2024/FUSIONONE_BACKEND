@@ -1,6 +1,6 @@
-# WhatsApp Invoice Backend — API Documentation
+# FUSION ONE Backend — API Documentation
 
-This document describes the complete public API for the WhatsApp Invoice Backend.
+This document describes the complete public API for the FUSION ONE Backend.
 It is written so that an external developer can build a client without access to
 the backend source code.
 
@@ -8,8 +8,9 @@ the backend source code.
 
 ## 1. Overview
 
-The WhatsApp Invoice Backend is a Node.js + TypeScript server that owns the
-complete WhatsApp lifecycle using Baileys. It provides:
+The FUSION ONE Backend is the dedicated application backend for FUSION ONE —
+a Node.js + TypeScript server that owns the complete WhatsApp lifecycle using
+Baileys, the invoice delivery pipeline, and user management. It provides:
 
 - **Automatic WhatsApp onboarding** — the backend generates QR codes and manages
   pairing. The client never starts or initializes WhatsApp.
@@ -46,7 +47,7 @@ complete WhatsApp lifecycle using Baileys. It provides:
 | `SUPABASE_SECRET_KEY` | Server-only Supabase secret key, used EXCLUSIVELY by owner-controlled Auth administration (user invitations / user listing). Never used for ordinary business reads/writes, never exposed to any frontend. Empty/unset = user-management endpoints fail closed. |
 | `APP_BASE_URL` | Public origin of the frontend app — invitation / password-reset email links redirect to `<APP_BASE_URL>/set-password`. |
 | `CLIENT_ORIGIN` | Allowed CORS browser origins (comma-separated list; `*` for dev sandboxes only) |
-| `DATA_DIR` / `WHATSAPP_AUTH_DIR` | Baileys auth state storage |
+| `WHATSAPP_AUTH_DIR` | Baileys auth state storage (default `./data/whatsapp/auth`) |
 | `EXPECTED_WHATSAPP_JID` | Optional WhatsApp identity pin |
 | `WHATSAPP_CLIENT_DISCONNECT_GRACE_MS` | Runtime retention: after the LAST authenticated frontend client disconnects (and no other runtime demand exists), the Baileys runtime keeps running for this long before the intentional stop (session preserved). Default 300000 (5 minutes). |
 | `WHATSAPP_WAKE_TIMEOUT_MS` | Bounded wait for a runtime wake to reach `CONNECTED` |
@@ -273,7 +274,7 @@ SPA talks to the backend cross-origin with the user's Supabase JWT.
 **Response (200):**
 ```json
 {
-  "service": "whatsapp-invoice-backend",
+  "service": "fusion-one-backend",
   "version": "1.0.0",
   "status": "running"
 }

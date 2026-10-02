@@ -27,10 +27,8 @@ class EventBusImpl extends EventEmitter {
       return;
     }
 
-    getLogger().info(
-      { eventType: envelope.type, timestamp: envelope.timestamp },
-      'Event emitted',
-    );
+    // debug, not info: QR countdown events fire every second while pairing.
+    getLogger().debug({ eventType: envelope.type }, 'Event emitted');
 
     this.emit('event', envelope);
     this.emit(envelope.type, envelope);

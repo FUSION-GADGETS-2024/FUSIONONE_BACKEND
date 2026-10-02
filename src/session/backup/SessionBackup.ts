@@ -1,22 +1,17 @@
 /**
- * Session Backup — the ONE Redis backup/recovery abstraction.
+ * Session Backup — the ONE Redis backup/recovery abstraction for the
+ * Baileys session (auth directory). Redis is a BACKUP layer, never the
+ * normal fast path: PRIMARY is the local persistent filesystem; this
+ * encrypted Redis backup is consulted ONLY when the local session is
+ * missing or unusable. Redis is never called from routes, controllers, or
+ * the security manager.
  *
- * Redis is a BACKUP layer for the Baileys session (auth directory), never
- * the normal fast path:
- *
- *   PRIMARY:   local persistent filesystem (Baileys useMultiFileAuthState)
- *   SECONDARY: this encrypted Redis backup, consulted ONLY when the local
- *              session is missing or unusable
- *
- * Redis is never called from routes, controllers, or the security manager.
- * The payload is encrypted with AES-256-GCM (scrypt-derived key from the
- * server-side WHATSAPP_BACKUP_ENCRYPTION_KEY secret, which is never exposed
- * to any frontend and never logged); only whitelisted Baileys auth files are
- * serialized, and the Redis URL (which contains credentials) is never logged.
- *
- * Backup writes go through a debounced scheduler so the normal operation is
- * never blocked — saves are fire-and-forget background work that always
- * converges to the latest valid session state.
+ * The payload is AES-256-GCM encrypted (scrypt-derived key from the
+ * server-side WHATSAPP_BACKUP_ENCRYPTION_KEY secret — never exposed to any
+ * frontend and never logged); only whitelisted Baileys auth files are
+ * serialized, and the Redis URL (which contains credentials) is never
+ * logged. Backup writes go through a debounced scheduler — fire-and-forget
+ * background work that always converges to the latest valid session state.
  */
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -31,14 +26,9 @@ const BACKUP_KEY = 'fusionone:whatsapp:session:backup';
 const BACKUP_FORMAT_VERSION = 1;
 
 /** Bounded Redis timeouts — the backup layer must never hang the app.
- *
- *  WHY no `socketTimeout`: node-redis maps it to net.Socket.setTimeout() —
- *  an IDLE-socket timeout that destroys the connection N ms after the last
- *  byte in either direction, regardless of pending commands. The backup
- *  layer is idle for minutes between saves, so it killed every healthy
- *  connection (the production "Socket timeout — Expecting data" error after
- *  every save). Per-COMMAND bounds are enforced by withTimeout() instead;
- *  TCP keepalive (node-redis default) keeps idle connections alive. */
+ *  NO socketTimeout: node-redis maps it to an IDLE-socket timeout that kills
+ *  healthy connections between saves (the production "Socket timeout —
+ *  Expecting data" error). Per-COMMAND bounds via withTimeout() instead. */
 const REDIS_CONNECT_TIMEOUT_MS = 5_000;
 const REDIS_COMMAND_TIMEOUT_MS = 10_000;
 
@@ -64,11 +54,9 @@ function isWhitelistedAuthFile(name: string): boolean {
 /**
  * The backup blob is DEFINITIVELY invalid: undecryptable (rotated key or
  * tampered payload), corrupt JSON, an unsupported format version, or a
- * payload that contains non-auth files. Only THIS class of failure may
- * invalidate (delete) the backup — infrastructure failures (Redis
- * unreachable, command timeout, filesystem errors) are TRANSIENT and must
- * NEVER invalidate it: a backup we cannot read right now may be perfectly
- * valid (and needed) later.
+ * payload with non-auth files. Only THIS class of failure may invalidate
+ * (delete) the backup — infrastructure failures (Redis unreachable, command
+ * timeout, filesystem errors) are TRANSIENT and must NEVER invalidate it.
  */
 export class BackupInvalidError extends Error {
   constructor(message: string) {
@@ -261,11 +249,9 @@ async function withTimeout<T>(op: Promise<T>, what: string): Promise<T> {
 
 /**
  * Whether an error is a TRANSPORT-LEVEL Redis failure — the connection is
- * in an unknown/unusable state afterwards (socket read/connect timeout,
- * refused/reset/dropped connection, a command on an already-closed client).
- * Fast server-side error replies (WRONGTYPE, MOVED, ACL denials, …) are NOT
- * transport failures: the connection stays healthy and must be neither torn
- * down nor retried.
+ * in an unknown/unusable state afterwards. Fast server-side error replies
+ * (WRONGTYPE, MOVED, ACL denials, …) are NOT transport failures: the
+ * connection stays healthy and must be neither torn down nor retried.
  */
 function isTransportFailure(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
@@ -295,20 +281,14 @@ function isTransportFailure(err: unknown): boolean {
 
 /**
  * Run ONE Redis command: bounded by the command timeout, with deterministic
- * recovery after a transport-level failure.
+ * recovery after a transport-level failure — the unusable client is reset,
+ * AT MOST ONE immediate retry runs on a fresh connection, then a clean
+ * backup error is thrown (NEVER a session/runtime state change). There is
+ * NO background reconnect worker, scheduler, or queue; every later
+ * operation lazily establishes a fresh connection anyway.
  *
- *   transport failure → the unusable client is reset (torn down) →
- *   AT MOST ONE immediate retry of the SAME operation on a fresh
- *   connection → if that also fails, a clean backup error is thrown (a
- *   degraded backup layer — NEVER a session/runtime state change).
- *
- * There is NO background reconnect worker, NO retry scheduler, NO queue —
- * recovery is exactly one bounded retry inside the failed operation, and
- * every later operation lazily establishes a fresh connection anyway.
- *
- * `mayRetry` (optional): a caller whose operation must NOT run again after
- * something happened in between (e.g. the backup was invalidated during the
- * failed save) can veto the retry.
+ * `mayRetry` lets a caller veto the retry when the operation must not run
+ * again (e.g. the backup was invalidated during the failed save).
  */
 async function executeCommand<T>(
   what: string,
@@ -344,8 +324,7 @@ async function executeCommand<T>(
 }
 
 /** Destroy the current client (if any) so the next operation reconnects.
- *  Used when the connection state is unknown — never as a normal-path close
- *  (graceful shutdown uses closeBackupClient/quit). */
+ *  Used when the connection state is unknown — never as a normal-path close. */
 async function teardownClient(): Promise<void> {
   const c = client;
   client = null;

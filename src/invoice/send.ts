@@ -1,17 +1,12 @@
 /**
  * Invoice send pipeline (backend-owned):
- *
- *   {invoiceId, invoiceType}
- *     → repository (Supabase load under the requesting user's JWT: header,
- *       party, items, trade-ins, store, whatsapp_settings)
- *     → builder (canonical InvoiceData)
- *     → recipient resolution (party.number → Indian JID normalization)
- *     → message resolution (whatsapp_settings template + placeholders)
- *     → PDFKit render (Prestige design) + canvas thumbnail (concurrently)
- *     → SendController (serialized transport: ONE PDF document message)
- *
- * Every piece of data comes from the database — nothing about the invoice is
- * supplied by the caller except its identity.
+ *   {invoiceId, invoiceType} → repository (Supabase load under the
+ *   requesting user's JWT) → builder (canonical InvoiceData) → recipient
+ *   resolution (party.number → Indian JID) → message resolution
+ *   (whatsapp_settings template) → PDFKit render + canvas thumbnail
+ *   (concurrently) → SendController (serialized transport: ONE PDF document
+ *   message). Every piece of data comes from the database — nothing about
+ *   the invoice is supplied by the caller except its identity.
  */
 import { getLogger } from '../logging/logger.js';
 import { AppError, ErrorCode } from '../errors/registry.js';
@@ -123,9 +118,8 @@ export async function sendInvoiceById(
   const caption = resolveDeliveryMessage(data, template);
 
   // 4. Render the PDF and the chat-bubble thumbnail CONCURRENTLY from the
-  //    same canonical InvoiceData (the thumbnail is never derived from the
-  //    PDF bytes). The thumbnail leg NEVER rejects: any failure resolves
-  //    jpeg=null and the invoice is still sent as a PDF without a preview.
+  //    same canonical InvoiceData. The thumbnail leg NEVER rejects: any
+  //    failure resolves jpeg=null and the invoice is still sent PDF-only.
   const prepStart = performance.now();
   let pdfMs = 0;
   let thumbnailMs = 0;
@@ -167,8 +161,8 @@ export async function sendInvoiceById(
   );
 
   // 5. Transport: ONE PDF document message with caption (serialized,
-  //    retried). A failed thumbnail generation (jpeg null) travels as null —
-  //    a clean PDF-only document message; nothing is re-derived here.
+  //    retried). A failed thumbnail (jpeg null) travels as null — a clean
+  //    PDF-only document message.
   const documentThumbnail: DocumentThumbnail | null =
     thumbnail.jpeg && thumbnail.width !== null && thumbnail.height !== null
       ? { jpeg: thumbnail.jpeg, width: thumbnail.width, height: thumbnail.height }

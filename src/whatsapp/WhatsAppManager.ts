@@ -1,22 +1,19 @@
 /**
- * WhatsApp Manager — the ONE Baileys runtime owner.
- *
- * Owns the single Baileys socket and its complete lifecycle: single-flight
- * startup shared by every caller (login / automatic wake / sendInvoice),
- * backend-owned QR generation + countdown, pairing retry and cancellation,
- * candidate resolution (local session first, then the encrypted Redis
- * backup), transient reconnects with bounded backoff, and demand-driven
- * runtime retention (clients present / active operations; a 5-minute grace
- * after the last client leaves). Logout and security destruction are
- * delegated to SessionManager.
+ * WhatsApp Manager — the ONE Baileys runtime owner. Owns the single Baileys
+ * socket and its complete lifecycle: single-flight startup shared by every
+ * caller (login / automatic wake / sendInvoice), backend-owned QR generation
+ * + countdown, pairing retry and cancellation, candidate resolution (local
+ * session first, then the encrypted Redis backup), transient reconnects with
+ * bounded backoff, and demand-driven runtime retention. Logout and security
+ * destruction are delegated to SessionManager.
  *
  * RUNTIME states (IDLE/PAIRING/CONNECTING/CONNECTED/RECONNECTING/…) are a
- * separate axis from the SESSION dimension (NONE/PRESENT/RESTORING) owned
- * by SessionManager. "IDLE + PRESENT" = runtime asleep, valid session
- * material preserved, waking on demand without QR.
+ * separate axis from the SESSION dimension (NONE/PRESENT/RESTORING) owned by
+ * SessionManager. "IDLE + PRESENT" = runtime asleep, valid session material
+ * preserved, waking on demand without QR.
  *
  * CRITICAL INVARIANT: there must never be multiple active Baileys sockets
- * for the same session. This class is the ONLY module that creates a socket.
+ * for the same session — this class is the ONLY module that creates a socket.
  * Intentional stops remove the socket's event listeners BEFORE ending it so
  * the close event can never reach the reconnect classifier.
  */
@@ -110,9 +107,9 @@ function isTransientFailure(statusCode: number | undefined): boolean {
 }
 
 /** QR lifetime in seconds — MUST match the `qrTimeout: 60_000` socket option:
- *  Baileys emits a fresh `qr` event every 60s, and each emission resets the
- *  countdown. No artificial login deadline exists: pairing stays active until
- *  it succeeds, fails, stops, or is ended by the retention policy. */
+ *  Baileys emits a fresh `qr` event every 60s, each resetting the countdown.
+ *  No artificial login deadline: pairing stays active until it succeeds,
+ *  fails, stops, or is ended by the retention policy. */
 const QR_REFRESH_INTERVAL_SECONDS = 60;
 
 /** Baileys wraps disconnect errors in Boom: the status code lives at
@@ -382,12 +379,10 @@ export class WhatsAppManager implements WhatsAppLifecycleHooks {
 
   /**
    * Cancel an ACTIVE pairing attempt — the pairing dialog's Close/Cancel.
-   * "I no longer want to pair": NOT logout; a validated session is never
-   * destroyed. Race safety is decided by the SETTLED state: PAIRING →
-   * cancel wins (IDLE + NONE); CONNECTING → defer to the lifecycle (the
-   * scan already progressed; never destroy); CONNECTED → no-op (the scan
-   * won; never log out); anything else → idempotent no-op. The state check
-   * and the stop run synchronously, so no socket event can interleave.
+   * NOT logout; a validated session is never destroyed. Race safety is
+   * decided by the SETTLED state: PAIRING → cancel wins (IDLE + NONE);
+   * CONNECTING → defer to the lifecycle (the scan already progressed);
+   * CONNECTED → no-op (the scan won); anything else → idempotent no-op.
    */
   async cancelPairing(): Promise<void> {
     const log = getLogger();
@@ -472,9 +467,8 @@ export class WhatsAppManager implements WhatsAppLifecycleHooks {
   /**
    * THE single-flight startup shared by every caller: at most ONE startup
    * (and one socket) exists at any time; concurrent callers share it. The
-   * returned promise NEVER rejects. 'login' settles into PAIRING/CONNECTING
-   * (the QR/connection flow proceeds via events); 'wake' additionally waits
-   * for CONNECTED within the bounded wake timeout.
+   * returned promise NEVER rejects. 'login' settles into PAIRING/CONNECTING;
+   * 'wake' additionally waits for CONNECTED within the bounded wake timeout.
    */
   private async beginStart(intent: StartIntent): Promise<StartOutcome> {
     const log = getLogger();
@@ -513,9 +507,8 @@ export class WhatsAppManager implements WhatsAppLifecycleHooks {
 
     // Join any in-flight startup — never start a second one. An explicit
     // LOGIN ESCALATES the in-flight operation (a presence wake may have
-    // started it, but the user has now explicitly asked to connect; the
-    // pairing decision points read the escalated intent). A WAKE never
-    // downgrades a login.
+    // started it, but the user has now explicitly asked to connect). A WAKE
+    // never downgrades a login.
     if (this.activeStart) {
       if (intent === 'login') {
         this.lastStartIntent = 'login';
@@ -572,10 +565,9 @@ export class WhatsAppManager implements WhatsAppLifecycleHooks {
    * set); NEVER rejects — failures are expressed in the StartOutcome.
    *
    * Generation protection: the session generation captured at entry is
-   * re-checked after every await that could overlap a destructive operation
-   * (restore, socket creation); a changed generation aborts the startup
-   * WITHOUT touching the state machine — the destructive operation already
-   * settled it and this startup must not resurrect anything.
+   * re-checked after every await that could overlap a destructive operation;
+   * a changed generation aborts the startup WITHOUT touching the state
+   * machine — the destructive operation already settled it.
    */
   private async runStart(intent: StartIntent): Promise<StartOutcome> {
     const log = getLogger();
@@ -694,8 +686,7 @@ export class WhatsAppManager implements WhatsAppLifecycleHooks {
    * Try to restore the session from the Redis backup. The outcome
    * distinction is MANDATORY: 'restored' — material written locally,
    * validation happens over the real connection; 'invalid' — DEFINITIVELY
-   * unusable (undecryptable/corrupt/format), already invalidated so the
-   * system converges to no-session; 'unavailable' — Redis unreachable, the
+   * unusable, already invalidated; 'unavailable' — Redis unreachable, the
    * backup is PRESERVED untouched (a transient failure must never destroy
    * potentially valid material).
    */
@@ -769,11 +760,11 @@ export class WhatsAppManager implements WhatsAppLifecycleHooks {
 
   /**
    * Demand exists while: any authenticated client is present, a startup is
-   * in flight, a send is executing, or a reconnect flow is active (state or
-   * armed timer). PAIRING alone is deliberately NOT demand: an abandoned
-   * pairing (last client gone, no other demand) is ended by the
-   * client-disconnect grace — the "never PAIRING forever" guarantee — while
-   * any present client keeps it alive.
+   * in flight, a send is executing, or a reconnect flow is active. PAIRING
+   * alone is deliberately NOT demand: an abandoned pairing (last client
+   * gone, no other demand) is ended by the client-disconnect grace — the
+   * "never PAIRING forever" guarantee — while any present client keeps it
+   * alive.
    */
   private hasRuntimeDemand(): boolean {
     if (this._clientPresence.clientCount > 0) return true;
@@ -862,10 +853,9 @@ export class WhatsAppManager implements WhatsAppLifecycleHooks {
 
   /**
    * The FIRST authenticated frontend client became present — a WAKE signal,
-   * never pairing intent. An existing session connects without QR; a
-   * missing local session may be recovered from Redis; a system with no
-   * reusable session anywhere settles back to IDLE + NONE (the user decides
-   * when to pair).
+   * never pairing intent. An existing session connects without QR; a missing
+   * local session may be recovered from Redis; no reusable session anywhere
+   * settles back to IDLE + NONE (the user decides when to pair).
    */
   private handleClientAppeared(): void {
     const log = getLogger();
@@ -905,13 +895,13 @@ export class WhatsAppManager implements WhatsAppLifecycleHooks {
   // ══════════════════════════════════════════════════════════════════════
 
   /**
-   * The current candidate was DEFINITIVELY rejected by WhatsApp (a QR
-   * emitted during CONNECTING, or a security-coded disconnect during the
-   * pre-validation connect). LOCAL rejected + a Redis backup exists → try
-   * the Redis candidate (it may be newer and valid — never destroy the
-   * backup just because the local candidate failed). No further candidate →
-   * ONE deterministic cleanup (destroySession) converging to session NONE +
-   * runtime IDLE; pairing then begins ONLY for an explicit login intent.
+   * The current candidate was DEFINITIVELY rejected by WhatsApp (a QR emitted
+   * during CONNECTING, or a security-coded disconnect during the
+   * pre-validation connect). LOCAL rejected + a Redis backup exists → try the
+   * Redis candidate (never destroy the backup just because the local
+   * candidate failed). No further candidate → ONE deterministic cleanup
+   * (destroySession) converging to session NONE + runtime IDLE; pairing then
+   * begins ONLY for an explicit login intent.
    */
   private async handleCandidateRejected(reason: string): Promise<void> {
     const log = getLogger();
@@ -983,9 +973,9 @@ export class WhatsAppManager implements WhatsAppLifecycleHooks {
     log.warn({ reason, intent: this.lastStartIntent }, 'All session candidates exhausted — deterministic cleanup');
 
     if (this.lastStartIntent === 'login') {
-      // The user explicitly asked to connect: clean the stale material
-      // first (fail-closed destruction), then pair from a clean slate — the
-      // ONLY path that may show a QR.
+      // The user explicitly asked to connect: clean the stale material first
+      // (fail-closed destruction), then pair from a clean slate — the ONLY
+      // path that may show a QR.
       await this.handleSecurityFailure(`Session stale (${reason}) — explicit pairing requested`);
       if (
         this.stateMachine.state === WhatsAppState.IDLE &&
@@ -1118,7 +1108,7 @@ export class WhatsAppManager implements WhatsAppLifecycleHooks {
         qrTimeout: 60_000,
         retryRequestDelayMs: cfg.sendRetryBaseMs,
         maxMsgRetryCount: cfg.sendMaxRetries,
-        browser: ['WhatsApp Invoice Backend', 'Chrome', '1.0.0'],
+        browser: ['FUSION ONE Backend', 'Chrome', '1.0.0'],
         // Baileys' internal logger is silenced: our logger handles all
         // structured logging with redaction (Baileys would leak keys/QR).
         logger: pino({ level: 'silent' }),

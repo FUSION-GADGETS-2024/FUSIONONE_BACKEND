@@ -1,37 +1,38 @@
 /**
  * User management service — the trusted owner-controlled boundary.
  *
- * Every operation here runs ONLY after requireOwner() has re-resolved the
- * caller (JWT → verified email → ACTIVE account → user_type = owner) — a
- * frontend "isOwner" flag is never trusted. Privileged Auth administration
- * uses the server-only secret-key client; the browser has no way to mutate
- * public.users.user_type / public.users.status (SELECT-only RLS policies).
+ * Every operation runs ONLY after requireOwner() re-resolved the caller
+ * (JWT → verified email → ACTIVE account → user_type = owner) — a frontend
+ * "isOwner" flag is never trusted. Privileged Auth administration uses the
+ * server-only admin client from the Supabase boundary.
  *
- * Model:
- *   user_type : owner | user | NULL   — role (NULL = unprovisioned, fail-closed)
- *   status    : active | blocked      — account access (independent of role)
+ * Model: user_type owner | user | NULL (NULL = unprovisioned, fail-closed);
+ * status active | blocked (independent of role).
  *
- * Invariants enforced here:
- *   * exactly one owner — the owner is never a managed user, can never be
- *     targeted, blocked or removed (also CHECK-constrained in the database)
- *   * no role management exists — invited users are always user_type='user'
+ * Invariants (the owner count is additionally trigger-enforced in the DB —
+ * migration 0005):
+ *   * never zero owners — a demotion only proceeds while another ACTIVE
+ *     owner remains, and the owner is never a self-target
+ *   * block / unblock / reset / remove / resend keep targeting user_type =
+ *     'user' only; only changeUserRole can target another owner
+ *   * role changes go ONLY through changeUserRole: 'owner' | 'user' — NULL
+ *     stays the internal fail-closed state and can never be assigned
  *   * shared business data is NEVER tied to user lifecycle — removing a user
  *     deletes only the Auth account (public.users follows via FK cascade)
- *   * invitation / password-reset use NATIVE Supabase Auth emails, all
- *     redirecting to /set-password; no custom tokens, no owner-set passwords
+ *   * invitation / password-reset use NATIVE Supabase Auth emails redirecting
+ *     to /set-password; no custom tokens, no owner-set passwords
  */
 import type { SupabaseClient, User } from '@supabase/supabase-js';
-import { createClient } from '@supabase/supabase-js';
 import { getConfig } from '../config/index.js';
 import { getLogger } from '../logging/logger.js';
 import { AppError, ErrorCode } from '../errors/registry.js';
-import { getAdminClient } from './authorize.js';
+import { requireAdminClient, getMailClient } from '../supabase/clients.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** A managed application user (always user_type = 'user'). */
-interface ManagedUserRow {
+/** A provisioned application user (owner | user) as shown in the Users list. */
+interface ProvisionedUserRow {
   id: string;
   email: string | null;
   status: 'active' | 'blocked';
@@ -46,7 +47,7 @@ export interface ManagedUserView {
   email: string | null;
   /** Personal display name (public.users.display_name; null = not set yet). */
   displayName: string | null;
-  userType: 'user';
+  userType: 'owner' | 'user';
   status: 'active' | 'blocked';
   emailConfirmed: boolean;
   createdAt: string | null;
@@ -75,31 +76,6 @@ function requireTargetId(raw: string): string {
     });
   }
   return raw;
-}
-
-/** The server-only admin client; user management fails closed without it. */
-function requireAdminClient(): SupabaseClient {
-  const admin = getAdminClient();
-  if (!admin) {
-    throw new AppError(ErrorCode.SERVER_NOT_READY, {
-      message: 'User management is not configured on this server.',
-      internalDetails: { reason: 'SUPABASE_SECRET_KEY missing' },
-    });
-  }
-  return admin;
-}
-
-/**
- * A publishable-key client for NATIVE email delivery. resetPasswordForEmail
- * is Supabase's supported mechanism for actually SENDING a recovery email
- * (the admin generateLink() API only CREATES a link — it never delivers
- * one; verified live). Runs server-side only.
- */
-function getMailClient(): SupabaseClient {
-  const cfg = getConfig();
-  return createClient(cfg.supabaseUrl, cfg.supabasePublishableKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
 }
 
 /** The public app origin for native Auth email links (→ /set-password). */
@@ -138,7 +114,7 @@ async function listAllAuthUsers(admin: SupabaseClient): Promise<User[]> {
  *   * owner row      → explicit rejection (the owner manages, is never managed)
  *   * NULL / missing → not a managed user (fail closed, 404)
  */
-async function requireManagedUser(admin: SupabaseClient, targetId: string): Promise<ManagedUserRow> {
+async function requireManagedUser(admin: SupabaseClient, targetId: string): Promise<ProvisionedUserRow> {
   const { data, error } = await admin
     .from('users')
     .select('id, user_type, status, created_at')
@@ -190,18 +166,19 @@ async function requireManagedUser(admin: SupabaseClient, targetId: string): Prom
 // ─── Operations ─────────────────────────────────────────────────────────────
 
 /**
- * List managed users (user_type = 'user') for the owner's Profile page.
- * The owner is NOT included (already shown in the Account section); NULL-role
- * accounts are not managed users and are not listed. Returns only the fields
- * the UI renders — no tokens, no Auth internals.
+ * List the users the owner manages (Profile → Users): every provisioned
+ * account (owner | user) EXCEPT the requester. NULL-role accounts are not
+ * provisioned users and are not listed. Returns only the fields the UI
+ * renders — no tokens, no Auth internals.
  */
-export async function listManagedUsers(): Promise<ManagedUserView[]> {
+export async function listManagedUsers(requesterId: string): Promise<ManagedUserView[]> {
   const admin = requireAdminClient();
 
   const appRes = await admin
     .from('users')
     .select('id, user_type, status, created_at, display_name')
-    .eq('user_type', 'user');
+    .in('user_type', ['owner', 'user'])
+    .neq('id', requesterId);
   if (appRes.error) {
     throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
       internalDetails: { step: 'users.select', pgError: appRes.error.message },
@@ -210,6 +187,7 @@ export async function listManagedUsers(): Promise<ManagedUserView[]> {
 
   const rows = (appRes.data ?? []) as {
     id: string;
+    user_type?: unknown;
     status?: unknown;
     created_at?: string | null;
     display_name?: string | null;
@@ -222,14 +200,15 @@ export async function listManagedUsers(): Promise<ManagedUserView[]> {
   const users: ManagedUserView[] = [];
   for (const authUser of authUsers) {
     const row = appById.get(authUser.id);
-    if (!row) continue; // not a managed user (owner / NULL / orphan)
+    if (!row) continue; // not a provisioned user (NULL / orphan)
+    const userType = row.user_type === 'owner' ? 'owner' : 'user';
     const status = row.status === 'blocked' ? 'blocked' : 'active';
     const emailConfirmed = authUser.email_confirmed_at != null;
     users.push({
       id: authUser.id,
       email: authUser.email ?? null,
       displayName: typeof row.display_name === 'string' ? row.display_name : null,
-      userType: 'user',
+      userType,
       status,
       emailConfirmed,
       createdAt: authUser.created_at ?? row.created_at ?? null,
@@ -249,11 +228,10 @@ export async function listManagedUsers(): Promise<ManagedUserView[]> {
 }
 
 /**
- * Invite a new user by email — native Supabase Admin invitation.
- * No password from the owner, no role selector, no auto-confirm: the invitee
- * receives Supabase's own invitation email (redirect → /set-password) and the
- * application row is provisioned user_type = 'user', status = 'active'
- * (email verification remains the gate until the invite is accepted).
+ * Invite a new user by email — native Supabase Admin invitation: no password
+ * from the owner, no auto-confirm; the invitee receives Supabase's own
+ * invitation email (redirect → /set-password) and the application row is
+ * provisioned user_type = 'user', status = 'active'.
  */
 export async function inviteUser(rawEmail: unknown): Promise<{ email: string }> {
   const admin = requireAdminClient();
@@ -285,9 +263,8 @@ export async function inviteUser(rawEmail: unknown): Promise<{ email: string }> 
   }
 
   // The provisioning trigger created the application row with user_type NULL.
-  // Resolve it to 'user' through THIS controlled path only (never owner). If
-  // this write fails the row stays NULL → the invitee cannot access the app
-  // (fail closed); the owner can retry after the duplicate check clears.
+  // Resolve it to 'user' through THIS controlled path only. If this write
+  // fails the row stays NULL → the invitee cannot access the app (fail closed).
   const { error: roleError } = await admin
     .from('users')
     .upsert({ id: invitedId, user_type: 'user', status: 'active' }, { onConflict: 'id' });
@@ -311,19 +288,15 @@ export async function inviteUser(rawEmail: unknown): Promise<{ email: string }> 
  * Resend a genuinely pending invitation — a FRESH native invitation email
  * for a user_type = 'user' account whose email is still unconfirmed.
  *
- * Delivery semantics (verified live against the TEST project): Supabase
- * exposes NO admin API that re-sends an invitation email for an existing
- * account (admin generateLink(type='invite') only CREATES a link — nothing
- * is delivered — and POST /auth/v1/admin/users/:id/resend does not exist).
- * The only native mechanism that actually DELIVERS an invitation email is
- * inviteUserByEmail, which requires the account not to exist yet. A pending
- * invitee has never signed in (unconfirmed accounts cannot authenticate)
- * and therefore holds no application data of any kind — shared business
- * data is never tied to user lifecycle. Resending therefore removes the
- * pending Auth account (public.users follows via the FK cascade) and issues
- * a fresh native invitation to the same address, then re-provisions the
- * application row (user_type = 'user'). The user id changes — semantically
- * this is a new invitation, exactly like Add User for the same email.
+ * Supabase exposes NO admin API that re-sends an invitation email for an
+ * existing account (generateLink(type='invite') only CREATES a link — nothing
+ * is delivered — verified live). The only native mechanism that actually
+ * DELIVERS is inviteUserByEmail, which requires the account not to exist.
+ * A pending invitee has never signed in and holds no application data, so
+ * resending removes the pending Auth account (public.users follows via the
+ * FK cascade) and issues a fresh invitation to the same address, then
+ * re-provisions the row (user_type = 'user'). The user id changes —
+ * semantically a new invitation, exactly like Add User for the same email.
  */
 export async function resendInvitation(rawTargetId: string): Promise<{ email: string }> {
   const admin = requireAdminClient();
@@ -350,9 +323,8 @@ export async function resendInvitation(rawTargetId: string): Promise<{ email: st
     });
   }
 
-  // 2. Fresh native invitation — the ONLY path that actually delivers the
-  //    invitation email. If this fails the pending account is gone (fail
-  //    closed: no access existed to lose); the owner can retry Add User.
+  // 2. Fresh native invitation — the ONLY path that actually delivers. If
+  //    this fails the pending account is gone (fail closed); retry Add User.
   const invite = await admin.auth.admin.inviteUserByEmail(target.email, {
     redirectTo: `${appBaseUrl}/set-password`,
   });
@@ -396,24 +368,19 @@ export async function resendInvitation(rawTargetId: string): Promise<{ email: st
 }
 
 /**
- * Block a managed user: status → 'blocked'. The block is enforced by
- * application authorization (backend requireAuthorizedUser + RLS helpers +
- * frontend resolver) — NEVER by session revocation. This Supabase Auth
- * version exposes no admin API to revoke another user's sessions by id
- * (admin.signOut takes the user's own JWT; /auth/v1/admin/logout does not
- * exist — verified live), and an already-issued access token would survive
- * revocation until expiry anyway. Every authorization layer re-checks the
- * status live per request, so a blocked user is locked out immediately
- * regardless of any still-valid token.
- * Only verified, active users can be blocked — an unconfirmed account is an
- * invitation-pending state (resend or remove it instead).
+ * Block a managed user: status → 'blocked'. The block is enforced live per
+ * request by every authorization layer (backend requireAuthorizedUser, RLS
+ * helpers, frontend resolver) — never by session revocation: this Supabase
+ * version has no admin API to revoke another user's sessions by id (verified
+ * live), and an issued access token would survive revocation until expiry
+ * anyway. Only verified, active users can be blocked — an unconfirmed
+ * account is invitation-pending (resend or remove it instead).
  */
 export async function blockUser(requesterId: string, rawTargetId: string): Promise<void> {
   const admin = requireAdminClient();
   const targetId = requireTargetId(rawTargetId);
   if (targetId === requesterId) {
-    // Structurally impossible (requester is owner, target is 'user') — kept
-    // as an explicit, self-documenting guard.
+    // Structurally impossible (requester is owner, target is 'user').
     throw new AppError(ErrorCode.USER_ACTION_INVALID, {
       message: 'You cannot block your own account.',
     });
@@ -474,11 +441,10 @@ export async function unblockUser(requesterId: string, rawTargetId: string): Pro
 /**
  * Send a password reset for a managed user — the NATIVE Supabase recovery
  * email, actually DELIVERED through resetPasswordForEmail (the admin
- * generateLink(type='recovery') API only creates a link and never sends
- * anything — verified live). The owner never chooses another user's
- * password; only verified users are eligible (unconfirmed accounts are
- * invitation-pending: resend the invitation). Rate-limited by Supabase's
- * own recover limits — surfaced as a clear failure, never swallowed.
+ * generateLink(type='recovery') API only creates a link — verified live).
+ * The owner never chooses another user's password; only verified users are
+ * eligible. Rate-limited by Supabase's own recover limits — surfaced as a
+ * clear failure, never swallowed.
  */
 export async function sendPasswordReset(rawTargetId: string): Promise<{ email: string }> {
   const admin = requireAdminClient();
@@ -516,11 +482,131 @@ export async function sendPasswordReset(rawTargetId: string): Promise<{ email: s
 }
 
 /**
+ * Change a user's role (owner ⇄ user) — requested from the Manage User
+ * dialog after an owner-side confirmation. Validation at this privileged
+ * mutation boundary:
+ *   requester: authenticated + verified + ACTIVE + owner (requireOwner,
+ *              re-resolved live — a frontend owner flag is never trusted)
+ *   target:    exists · provisioned · not the requester · email confirmed ·
+ *              not blocked
+ *   role:      'owner' | 'user' only (NULL can never be assigned)
+ *   invariant: a demotion must leave another ACTIVE owner — checked here
+ *              for a clean error and trigger-enforced in the DB (0005).
+ */
+export async function changeUserRole(
+  requesterId: string,
+  rawTargetId: string,
+  rawRole: unknown,
+): Promise<{ role: 'owner' | 'user'; email: string | null }> {
+  const admin = requireAdminClient();
+  const targetId = requireTargetId(rawTargetId);
+
+  if (rawRole !== 'owner' && rawRole !== 'user') {
+    throw new AppError(ErrorCode.API_REQUEST_INVALID, {
+      message: 'Role must be "owner" or "user".',
+    });
+  }
+  const role: 'owner' | 'user' = rawRole;
+
+  if (targetId === requesterId) {
+    throw new AppError(ErrorCode.USER_ACTION_INVALID, {
+      message: 'You cannot change your own role.',
+    });
+  }
+
+  // The target's application row must exist and be provisioned.
+  const { data, error } = await admin
+    .from('users')
+    .select('id, user_type, status')
+    .eq('id', targetId)
+    .maybeSingle();
+  if (error) {
+    throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+      internalDetails: { step: 'users.select', pgError: error.message },
+    });
+  }
+  const row = data as { id: string; user_type: string | null; status?: unknown } | null;
+  if (!row) {
+    throw new AppError(ErrorCode.USER_NOT_FOUND);
+  }
+  if (row.user_type !== 'owner' && row.user_type !== 'user') {
+    // NULL / invalid role — not a provisioned application user.
+    throw new AppError(ErrorCode.USER_NOT_FOUND, {
+      message: 'This account has not been invited to FUSION ONE.',
+    });
+  }
+  if (row.user_type === role) {
+    throw new AppError(ErrorCode.USER_ACTION_INVALID, {
+      message: `This account already has the ${role === 'owner' ? 'Owner' : 'User'} role.`,
+    });
+  }
+
+  // Email verification is Supabase Auth's truth — a pending invitation has
+  // no confirmed identity and no role yet.
+  const authRes = await admin.auth.admin.getUserById(targetId);
+  if (authRes.error || !authRes.data.user) {
+    throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+      internalDetails: { step: 'admin.getUserById', cause: authRes.error?.message },
+    });
+  }
+  const authUser = authRes.data.user;
+
+  if (authUser.email_confirmed_at == null) {
+    throw new AppError(ErrorCode.USER_ACTION_INVALID, {
+      message: 'This invitation is still pending. The user must accept it before their role can change.',
+    });
+  }
+  if (row.status === 'blocked') {
+    // Promoting a blocked account is impossible (owners can never be blocked
+    // — DB CHECK from 0002); unblock first.
+    throw new AppError(ErrorCode.USER_ACTION_INVALID, {
+      message: 'Unblock this user before changing their role.',
+    });
+  }
+
+  // Owner invariant: a demotion must leave another active owner. The
+  // requester (an active owner, ≠ target) normally guarantees this — the
+  // explicit count also covers direct API races; the 0005 trigger is the
+  // database-level backstop.
+  if (row.user_type === 'owner' && role === 'user') {
+    const { count, error: countError } = await admin
+      .from('users')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_type', 'owner')
+      .eq('status', 'active')
+      .neq('id', targetId);
+    if (countError) {
+      throw new AppError(ErrorCode.SERVER_INTERNAL_ERROR, {
+        internalDetails: { step: 'users.count(owners)', pgError: countError.message },
+      });
+    }
+    if (!count) {
+      throw new AppError(ErrorCode.USER_ACTION_INVALID, {
+        message: 'At least one other active owner must remain.',
+      });
+    }
+  }
+
+  const { error: updateError } = await admin
+    .from('users')
+    .update({ user_type: role })
+    .eq('id', targetId);
+  if (updateError) {
+    throw new AppError(ErrorCode.USER_ACTION_FAILED, {
+      internalDetails: { step: 'users.update(user_type)', pgError: updateError.message },
+    });
+  }
+
+  getLogger().info({ targetId, role }, 'User role changed');
+  return { role, email: authUser.email ?? null };
+}
+
+/**
  * Remove a managed user — permanently deletes their FUSION ONE ACCOUNT
  * through the trusted admin API. public.users follows via the FK cascade.
- * Shared business data (invoices, parties, transactions, payments, accounts,
- * inventory, financial years, WhatsApp configuration, store) has NO
- * per-user ownership and is never touched by a user's removal.
+ * Shared business data (invoices, parties, payments, accounts, inventory,
+ * financial years, WhatsApp configuration, store) has NO per-user ownership
+ * and is never touched by a user's removal.
  */
 export async function removeUser(requesterId: string, rawTargetId: string): Promise<void> {
   const admin = requireAdminClient();

@@ -1,14 +1,12 @@
 /**
  * sendInvoice request validation. The request identifies the invoice:
- *   invoiceId    required — UUID of the invoice to send
- *   invoiceType  required — 'sale' | 'purchase' | 'proforma'
- *   requestId    optional — tracing identifier (generated if absent)
+ *   invoiceId (UUID) · invoiceType ('sale' | 'purchase' | 'proforma') ·
+ *   requestId (optional tracing id, generated if absent)
  *
- * The backend is the invoice owner: it loads the authoritative data from
- * Supabase itself. The client never supplies invoice rows, totals,
- * recipients, captions, or binaries. The LEGACY image-based contract
- * ({recipient, image, caption}) is REJECTED explicitly — it must not linger
- * as a hidden alternate path.
+ * The backend is the invoice owner — the client never supplies invoice
+ * rows, totals, recipients, captions, or binaries. The LEGACY image-based
+ * contract ({recipient, image, caption}) is REJECTED explicitly so it
+ * cannot linger as a hidden alternate path.
  */
 import { z } from 'zod';
 import { AppError, ErrorCode } from '../errors/registry.js';

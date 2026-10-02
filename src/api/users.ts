@@ -1,19 +1,8 @@
 /**
- * User management endpoints — OWNER ONLY.
- *
- *   GET    /api/users                    — list managed users
- *   POST   /api/users/invite             — invite a new user by email
- *   POST   /api/users/:id/resend-invite  — resend a pending invitation
- *   POST   /api/users/:id/block          — block a user (status = 'blocked')
- *   POST   /api/users/:id/unblock        — unblock a user (status = 'active')
- *   POST   /api/users/:id/reset-password — send the native recovery email
- *   DELETE /api/users/:id                — permanently remove the account
- *
- * Handlers stay thin: every request is authorized first (JWT → verified →
- * ACTIVE account → owner), then the trusted user-management service runs
- * with the server-only Supabase admin client. The owner is never a managed
- * user (no self-blocking, no self-removal, no role management); shared
- * business data is never tied to user lifecycle.
+ * User management endpoints — OWNER ONLY (see user-management.ts for the
+ * service invariants). Handlers stay thin: authorize first (JWT → verified →
+ * ACTIVE account → owner), then run the trusted service with the
+ * server-only admin client.
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { requireOwner } from './authorize.js';
@@ -21,6 +10,7 @@ import {
   listManagedUsers,
   inviteUser,
   resendInvitation,
+  changeUserRole,
   blockUser,
   unblockUser,
   sendPasswordReset,
@@ -32,9 +22,9 @@ function targetIdFrom(req: FastifyRequest): unknown {
   return params.id;
 }
 
-async function listUsersHandler(_req: FastifyRequest, reply: FastifyReply) {
-  await requireOwner(_req);
-  const users = await listManagedUsers();
+async function listUsersHandler(req: FastifyRequest, reply: FastifyReply) {
+  const owner = await requireOwner(req);
+  const users = await listManagedUsers(owner.id);
   reply.code(200).send({ users });
 }
 
@@ -43,6 +33,13 @@ async function inviteUserHandler(req: FastifyRequest, reply: FastifyReply) {
   const body = (req.body ?? {}) as { email?: unknown };
   const { email } = await inviteUser(body.email);
   reply.code(200).send({ invited: true, email });
+}
+
+async function changeRoleHandler(req: FastifyRequest, reply: FastifyReply) {
+  const owner = await requireOwner(req);
+  const body = (req.body ?? {}) as { role?: unknown };
+  const { role } = await changeUserRole(owner.id, String(targetIdFrom(req) ?? ''), body.role);
+  reply.code(200).send({ changed: true, role });
 }
 
 async function resendInviteHandler(req: FastifyRequest, reply: FastifyReply) {
@@ -78,6 +75,7 @@ async function removeUserHandler(req: FastifyRequest, reply: FastifyReply) {
 export function registerUserRoutes(app: FastifyInstance): void {
   app.get('/api/users', listUsersHandler);
   app.post('/api/users/invite', inviteUserHandler);
+  app.post('/api/users/:id/role', changeRoleHandler);
   app.post('/api/users/:id/resend-invite', resendInviteHandler);
   app.post('/api/users/:id/block', blockUserHandler);
   app.post('/api/users/:id/unblock', unblockUserHandler);

@@ -1,47 +1,13 @@
 /**
- * Invoice repository — authoritative Supabase data access.
- *
- * Loads everything required to render and send an invoice from the
- * database, keyed ONLY by invoice id + type. Every query runs under the
- * REQUESTING USER's JWT with the project's publishable key (`Supabase +
- * user JWT + RLS`): only authorized FUSION ONE users (owner or user, who
- * share the one store) can load invoices. The server-only secret key is
- * never used for these reads.
- *
- * Only the tables needed for invoice rendering/sending are queried.
+ * Invoice repository — authoritative Supabase data access. Loads everything
+ * required to render and send an invoice, keyed ONLY by invoice id + type,
+ * always through the caller-scoped client (user JWT + RLS — the secret key
+ * is never used for these reads).
  */
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { getConfig } from '../config/index.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { AppError, ErrorCode } from '../errors/registry.js';
+import { getUserClient } from '../supabase/clients.js';
 import type { WhatsAppSettingsRow } from './delivery.js';
-
-/** Cached user-scoped clients (one per access token, LRU-bounded). */
-const userClients = new Map<string, SupabaseClient>();
-const USER_CLIENT_MAX = 16;
-
-/**
- * Create (or reuse) a Supabase client running under the requesting user's
- * identity — publishable key + the user's Bearer JWT. RLS applies to every
- * query made through this client. Shared by the invoice repository and the
- * application-authorization module (single client cache).
- */
-export function getSupabaseForUser(accessToken: string): SupabaseClient {
-  let client = userClients.get(accessToken);
-  if (!client) {
-    const cfg = getConfig();
-    client = createClient(cfg.supabaseUrl, cfg.supabasePublishableKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-      global: { headers: { Authorization: `Bearer ${accessToken}` } },
-    });
-    if (userClients.size >= USER_CLIENT_MAX) {
-      // Drop the oldest entry (Map preserves insertion order).
-      const oldest = userClients.keys().next().value;
-      if (oldest) userClients.delete(oldest);
-    }
-    userClients.set(accessToken, client);
-  }
-  return client;
-}
 
 /**
  * Resolve THE (single) store for the authenticated user. RLS scopes the read
@@ -108,7 +74,7 @@ export interface SaleInvoiceRows {
 }
 
 export async function loadSaleInvoice(invoiceId: string, accessToken: string): Promise<SaleInvoiceRows> {
-  const db = getSupabaseForUser(accessToken);
+  const db = getUserClient(accessToken);
 
   const [saleRes, itemsRes, tradeInsRes, store] = await Promise.all([
     db.from('sales').select('*, parties (name, number, address)').eq('id', invoiceId).maybeSingle(),
@@ -159,7 +125,7 @@ export interface PurchaseInvoiceRows {
 }
 
 export async function loadPurchaseInvoice(invoiceId: string, accessToken: string): Promise<PurchaseInvoiceRows> {
-  const db = getSupabaseForUser(accessToken);
+  const db = getUserClient(accessToken);
 
   const [purchaseRes, itemsRes, store] = await Promise.all([
     db.from('purchases').select('*, parties (name, number, address)').eq('id', invoiceId).maybeSingle(),
@@ -203,7 +169,7 @@ export interface ProformaInvoiceRows {
 }
 
 export async function loadProformaInvoice(invoiceId: string, accessToken: string): Promise<ProformaInvoiceRows> {
-  const db = getSupabaseForUser(accessToken);
+  const db = getUserClient(accessToken);
 
   const [proformaRes, itemsRes, tradeInsRes, store] = await Promise.all([
     db.from('proforma_invoices').select('*, parties (name, number, address)').eq('id', invoiceId).maybeSingle(),
