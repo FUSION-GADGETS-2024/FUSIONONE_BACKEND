@@ -42,7 +42,9 @@ complete WhatsApp lifecycle using Baileys. It provides:
 |----------|---------|
 | `PORT` / `HOST` | HTTP server bind (default 3000 / 0.0.0.0) |
 | `SUPABASE_URL` | Supabase project URL (authoritative invoice data) |
-| `SUPABASE_PUBLISHABLE_KEY` | Supabase publishable key — combined with the requesting user's JWT for every data access (RLS-enforced). There is **no secret/service key** in this service. |
+| `SUPABASE_PUBLISHABLE_KEY` | Supabase publishable key — combined with the requesting user's JWT for every data access (RLS-enforced). |
+| `SUPABASE_SECRET_KEY` | Server-only Supabase secret key, used EXCLUSIVELY by owner-controlled Auth administration (user invitations / user listing). Never used for ordinary business reads/writes, never exposed to any frontend. Empty/unset = user-management endpoints fail closed. |
+| `APP_BASE_URL` | Public origin of the frontend app — invitation / password-reset email links redirect to `<APP_BASE_URL>/set-password`. |
 | `CLIENT_ORIGIN` | Allowed CORS browser origins (comma-separated list; `*` for dev sandboxes only) |
 | `DATA_DIR` / `WHATSAPP_AUTH_DIR` | Baileys auth state storage |
 | `EXPECTED_WHATSAPP_JID` | Optional WhatsApp identity pin |
@@ -155,19 +157,45 @@ The user id comes from the verified `sub` claim — request-body identity fields
 are rejected. Because native `EventSource` cannot send headers, SSE clients
 should use `fetch`-based streaming with the `Authorization` header.
 
-### Endpoint Authentication Policy
+### Application Authorization (above authentication)
 
-| Endpoint | Auth Required |
-|----------|--------------|
-| `GET /health/live` | No |
-| `GET /health/ready` | No |
-| `GET /` (service banner) | No |
-| `GET /ping` (wakeup probe) | Dedicated `X-Ping-Token` header (NOT the JWT model) |
-| `GET /api/status` | **Yes** (valid user JWT) |
-| `GET /api/events` (SSE) | **Yes** (valid user JWT) |
-| `POST /api/whatsapp/login` | **Yes** (valid user JWT) |
-| `POST /api/whatsapp/logout` | **Yes** (valid user JWT) |
-| `POST /api/whatsapp/sendInvoice` | **Yes** (valid user JWT) |
+A valid JWT proves the IDENTITY; the backend additionally decides what that
+identity may do inside FUSION ONE before serving any `/api/*` route:
+
+1. **Email verified?** — read live from Supabase Auth (`GET /auth/v1/user`
+   with the caller's own token; cached briefly per user). Unverified → `403
+   EMAIL_VERIFICATION_REQUIRED`.
+2. **Provisioned application user?** — the caller's `public.users` row is
+   read through the caller-scoped client (RLS self-read). Missing row or
+   `user_type` NULL/invalid → `403 APP_ACCESS_REQUIRED` (fail closed).
+3. **Owner-only routes** additionally require `user_type = 'owner'` → else
+   `403 OWNER_REQUIRED`.
+
+RLS remains the final database boundary; these checks make the backend fail
+closed early. The WhatsApp runtime itself stays globally shared — it is never
+user-specific.
+
+### Endpoint Authorization Policy
+
+| Endpoint | Auth | Authorization |
+|----------|------|---------------|
+| `GET /health/live` | No | — |
+| `GET /health/ready` | No | — |
+| `GET /` (service banner) | No | — |
+| `GET /ping` (wakeup probe) | Dedicated `X-Ping-Token` header (NOT the JWT model) | — |
+| `GET /api/status` | **Yes** (valid user JWT) | Authorized app user (owner or user) |
+| `GET /api/events` (SSE) | **Yes** (valid user JWT) | Authorized app user (owner or user) |
+| `POST /api/whatsapp/login` | **Yes** (valid user JWT) | **Owner only** (shared-connection configuration) |
+| `POST /api/whatsapp/cancelPairing` | **Yes** (valid user JWT) | Authorized app user |
+| `POST /api/whatsapp/sendInvoice` | **Yes** (valid user JWT) | Authorized app user (shared business operation) |
+| `POST /api/whatsapp/logout` | **Yes** (valid user JWT) | **Owner only** (shared-session destruction) |
+| `GET /api/users` | **Yes** (valid user JWT) | **Owner only** |
+| `POST /api/users/invite` | **Yes** (valid user JWT) | **Owner only** |
+| `POST /api/users/:id/resend-invite` | **Yes** (valid user JWT) | **Owner only** |
+| `POST /api/users/:id/block` | **Yes** (valid user JWT) | **Owner only** |
+| `POST /api/users/:id/unblock` | **Yes** (valid user JWT) | **Owner only** |
+| `POST /api/users/:id/reset-password` | **Yes** (valid user JWT) | **Owner only** |
+| `DELETE /api/users/:id` | **Yes** (valid user JWT) | **Owner only** |
 
 ### Unauthorized Responses
 
@@ -189,6 +217,39 @@ HTTP 401
   "error": {
     "code": "API_AUTH_INVALID",
     "message": "The provided authentication credentials are invalid."
+  }
+}
+```
+
+**Unverified email (valid JWT):**
+```json
+HTTP 403
+{
+  "error": {
+    "code": "EMAIL_VERIFICATION_REQUIRED",
+    "message": "Verify your email address before accessing FUSION ONE."
+  }
+}
+```
+
+**No FUSION ONE access (valid JWT, verified, no application user):**
+```json
+HTTP 403
+{
+  "error": {
+    "code": "APP_ACCESS_REQUIRED",
+    "message": "You do not have access to FUSION ONE."
+  }
+}
+```
+
+**Owner-only route called by a normal user:**
+```json
+HTTP 403
+{
+  "error": {
+    "code": "OWNER_REQUIRED",
+    "message": "Owner access is required for this operation."
   }
 }
 ```
@@ -569,6 +630,189 @@ next login attempt.
 - `503 SERVER_NOT_READY` — server is shutting down
 
 See [Logout API](#8-logout-api) for more details.
+
+---
+
+### GET /api/users
+
+**Owner only.** Lists the MANAGED users (rows with `user_type = 'user'`) for the
+Profile page. The owner is never included (already shown in the Account
+section) and NULL-role accounts are not managed users (fail-closed, not
+listed). Rows join Supabase Auth (emails, verification, last sign-in) with
+their `public.users` application rows, and carry a derived presentation
+state — no duplicate database columns.
+
+**Request:**
+```
+GET /api/users
+Authorization: Bearer <Supabase access token>
+```
+
+**Success Response (200):**
+```json
+{
+  "users": [
+    {
+      "id": "7a3ed254-8c15-4e83-aa3d-0add1c507bd9",
+      "email": "user@fusionone.test",
+      "userType": "user",
+      "status": "active",
+      "emailConfirmed": true,
+      "createdAt": "2026-10-01T19:56:16.164Z",
+      "lastSignInAt": "2026-10-01T21:12:15.577Z",
+      "state": "active"
+    }
+  ]
+}
+```
+
+`status` is the account access state (`active` | `blocked`), independent of
+the role. `state` is the derived presentation state: `active` (verified +
+active), `blocked`, or `invitation_pending` (invited, email not yet
+confirmed).
+
+**Possible Errors:**
+- `401 API_AUTH_REQUIRED` / `401 API_AUTH_INVALID` — missing/invalid token
+- `403 EMAIL_VERIFICATION_REQUIRED` — caller's email not verified
+- `403 ACCOUNT_BLOCKED` — caller's account is blocked
+- `403 APP_ACCESS_REQUIRED` — caller has no FUSION ONE access
+- `403 OWNER_REQUIRED` — caller is not the owner
+- `503 SERVER_NOT_READY` — user management not configured (missing `SUPABASE_SECRET_KEY`)
+
+---
+
+### POST /api/users/invite
+
+**Owner only.** Invites a new FUSION ONE user by email. The invitation,
+email verification and password setup are handled NATIVELY by Supabase Auth
+(`inviteUserByEmail`): the owner never supplies a password or a role, the
+invitee's email is never auto-confirmed, and the invitee sets their own
+password on `/set-password` (the email link's redirect target). The
+application row is provisioned automatically with `user_type = NULL`
+(database trigger) and resolves to `user` ONLY through this controlled path.
+
+**Request:**
+```
+POST /api/users/invite
+Authorization: Bearer <Supabase access token>
+Content-Type: application/json
+
+{ "email": "teammate@example.com" }
+```
+
+**Success Response (200):**
+```json
+{ "invited": true, "email": "teammate@example.com" }
+```
+
+**Possible Errors:**
+- `400 API_REQUEST_INVALID` — missing/invalid email
+- `401 API_AUTH_REQUIRED` / `401 API_AUTH_INVALID` — missing/invalid token
+- `403 EMAIL_VERIFICATION_REQUIRED` / `403 APP_ACCESS_REQUIRED` — caller not verified / no access
+- `403 OWNER_REQUIRED` — caller is not the owner
+- `409 USER_ALREADY_EXISTS` — an account with this email already exists
+- `502 USER_INVITE_FAILED` — the invitation email could not be sent, or provisioning failed (the invitee stays `NULL` — fail closed)
+- `503 SERVER_NOT_READY` — user management not configured (missing `SUPABASE_SECRET_KEY` / `APP_BASE_URL`)
+
+---
+
+### POST /api/users/:id/resend-invite
+
+**Owner only.** Resends a GENUINELY pending invitation (target must be
+`user_type = 'user'` with an unconfirmed email). Because Supabase exposes no
+admin API that re-sends an invitation email for an existing account
+(`generateLink(type: 'invite')` only CREATES a link — nothing is delivered —
+and `/auth/v1/admin/users/:id/resend` does not exist, both verified live),
+the resend DELIVERS by removing the never-used pending account (a pending
+invitee has never authenticated and holds no data; `public.users` follows
+via FK cascade) and issuing a FRESH native `inviteUserByEmail` invitation
+to the same address, then re-provisioning the application row
+(`user_type = 'user'`). The user id changes — semantically a new invitation.
+The email redirects to `/set-password` exactly like the original invite.
+
+**Request:**
+```
+POST /api/users/<user-id>/resend-invite
+Authorization: Bearer <Supabase access token>
+```
+
+**Success Response (200):** `{ "resent": true, "email": "…" }`
+
+**Possible Errors:**
+- `400 API_REQUEST_INVALID` — malformed user id
+- `403 OWNER_REQUIRED` / `403 ACCOUNT_BLOCKED` / … — authorization gates
+- `404 USER_NOT_FOUND` — no managed user with this id
+- `409 USER_ACTION_INVALID` — target is the owner, or the invitation was already accepted
+- `502 USER_ACTION_FAILED` — the pending account could not be removed
+- `502 USER_INVITE_FAILED` — the new invitation email could not be sent / provisioning failed (fail closed)
+
+### POST /api/users/:id/block
+
+**Owner only.** Blocks a managed user: `status = 'blocked'`. Blocking is
+enforced by application authorization ONLY (this backend's
+`requireAuthorizedUser`, the RLS helpers `private.can_access_app` /
+`private.is_owner`, and the frontend access resolver) — every layer re-checks
+the status live per request, so a blocked user is locked out immediately even
+while a previously-issued access token remains cryptographically valid.
+(Supabase Auth exposes no admin API to revoke another user's sessions by id;
+session revocation is deliberately NOT part of the block.) Only verified, active users can be
+blocked (an unconfirmed account is invitation-pending: resend or remove).
+
+**Request:**
+```
+POST /api/users/<user-id>/block
+Authorization: Bearer <Supabase access token>
+```
+
+**Success Response (200):** `{ "blocked": true }`
+
+**Possible Errors:**
+- `400 API_REQUEST_INVALID` — malformed user id
+- `403 OWNER_REQUIRED` / authorization gates
+- `404 USER_NOT_FOUND` — no managed user with this id
+- `409 USER_ACTION_INVALID` — target is the owner / the requester / already blocked / invitation still pending
+- `502 USER_ACTION_FAILED` — the status write failed
+
+### POST /api/users/:id/unblock
+
+**Owner only.** Unblocks a managed user: `status = 'active'`. The role is
+never touched and neither is any business data.
+
+**Success Response (200):** `{ "unblocked": true }`
+
+**Possible Errors:** as above; `409 USER_ACTION_INVALID` when the target is
+not blocked.
+
+### POST /api/users/:id/reset-password
+
+**Owner only.** Sends the NATIVE Supabase password-recovery email — actually
+DELIVERED through `resetPasswordForEmail` (the admin `generateLink`
+API only creates a link and never sends one — verified live). The owner
+never chooses another user's password; only verified users are eligible
+(unconfirmed accounts are invitation-pending — resend the invitation).
+
+**Success Response (200):** `{ "sent": true, "email": "…" }`
+
+**Possible Errors:** as above; `409 USER_ACTION_INVALID` when the target's
+invitation is still pending; `502 USER_ACTION_FAILED` when Supabase refuses
+the send (e.g. its per-email rate limit).
+
+### DELETE /api/users/:id
+
+**Owner only.** Permanently removes a managed user's FUSION ONE ACCOUNT via
+the trusted admin API. `public.users` follows through the FK cascade.
+Shared business data (invoices, parties, transactions, payments, accounts,
+inventory, financial years, WhatsApp configuration, store) has NO per-user
+ownership and is never deleted by a user's removal.
+
+**Success Response (200):** `{ "removed": true }`
+
+**Possible Errors:**
+- `400 API_REQUEST_INVALID` — malformed user id
+- `403 OWNER_REQUIRED` / authorization gates
+- `404 USER_NOT_FOUND` — no managed user with this id (or a NULL-role account)
+- `409 USER_ACTION_INVALID` — target is the owner or the requester
+- `502 USER_ACTION_FAILED` — the Auth account could not be deleted
 
 ---
 

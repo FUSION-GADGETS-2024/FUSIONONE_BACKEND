@@ -7,9 +7,9 @@
 import type { InvoiceData, InvoiceType } from './types.js';
 import { AppError, ErrorCode } from '../errors/registry.js';
 
-/** The whatsapp_settings columns relevant to message resolution. */
+/** The whatsapp_settings columns relevant to message resolution.
+ *  Store-level shared configuration (singleton row) since the auth migration. */
 export interface WhatsAppSettingsRow {
-  owner_user_id: string;
   auto_send_sale: boolean | null;
   auto_send_purchase: boolean | null;
   auto_send_proforma: boolean | null;

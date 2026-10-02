@@ -4,8 +4,9 @@
  * Loads everything required to render and send an invoice from the
  * database, keyed ONLY by invoice id + type. Every query runs under the
  * REQUESTING USER's JWT with the project's publishable key (`Supabase +
- * user JWT + RLS`): an authenticated user can only load invoices their own
- * store owns. No secret/service key exists in this service.
+ * user JWT + RLS`): only authorized FUSION ONE users (owner or user, who
+ * share the one store) can load invoices. The server-only secret key is
+ * never used for these reads.
  *
  * Only the tables needed for invoice rendering/sending are queried.
  */
@@ -21,9 +22,10 @@ const USER_CLIENT_MAX = 16;
 /**
  * Create (or reuse) a Supabase client running under the requesting user's
  * identity — publishable key + the user's Bearer JWT. RLS applies to every
- * query made through this client.
+ * query made through this client. Shared by the invoice repository and the
+ * application-authorization module (single client cache).
  */
-function getSupabaseForUser(accessToken: string): SupabaseClient {
+export function getSupabaseForUser(accessToken: string): SupabaseClient {
   let client = userClients.get(accessToken);
   if (!client) {
     const cfg = getConfig();
@@ -42,9 +44,10 @@ function getSupabaseForUser(accessToken: string): SupabaseClient {
 }
 
 /**
- * Resolve THE store for the authenticated user. RLS already scopes the read
- * to the owner; the selection semantics stay explicit: no row = not
- * configured, more than one = ambiguous.
+ * Resolve THE (single) store for the authenticated user. RLS scopes the read
+ * to authorized FUSION ONE users (owner and user share the same store); the
+ * selection semantics stay explicit: no row = not configured, more than one
+ * = ambiguous (structurally impossible since the singleton constraint).
  */
 async function resolveStore(db: SupabaseClient): Promise<any> {
   const { data, error } = await db.from('store').select('*');
@@ -67,18 +70,14 @@ async function resolveStore(db: SupabaseClient): Promise<any> {
   return data[0];
 }
 
-/** Load whatsapp_settings for the store owner. Returns null when absent. */
-async function loadWhatsAppSettings(store: any, db: SupabaseClient): Promise<WhatsAppSettingsRow | null> {
-  const ownerId = store?.owner_user_id;
-  if (!ownerId) return null;
-
+/** Load the store-level whatsapp_settings (singleton row). Returns null when absent. */
+async function loadWhatsAppSettings(db: SupabaseClient): Promise<WhatsAppSettingsRow | null> {
   const { data, error } = await db
     .from('whatsapp_settings')
     .select(
-      'owner_user_id, auto_send_sale, auto_send_purchase, auto_send_proforma, ' +
+      'auto_send_sale, auto_send_purchase, auto_send_proforma, ' +
         'sale_message_template, purchase_message_template, proforma_message_template',
     )
-    .eq('owner_user_id', ownerId)
     .maybeSingle();
 
   if (error) {
@@ -141,7 +140,7 @@ export async function loadSaleInvoice(invoiceId: string, accessToken: string): P
   }
 
   const sale = requireRow(saleRes.data, invoiceId);
-  const whatsappSettings = await loadWhatsAppSettings(store, db);
+  const whatsappSettings = await loadWhatsAppSettings(db);
 
   return {
     sale,
@@ -185,7 +184,7 @@ export async function loadPurchaseInvoice(invoiceId: string, accessToken: string
   }
 
   const purchase = requireRow(purchaseRes.data, invoiceId);
-  const whatsappSettings = await loadWhatsAppSettings(store, db);
+  const whatsappSettings = await loadWhatsAppSettings(db);
 
   return {
     purchase,
@@ -233,7 +232,7 @@ export async function loadProformaInvoice(invoiceId: string, accessToken: string
   }
 
   const proforma = requireRow(proformaRes.data, invoiceId);
-  const whatsappSettings = await loadWhatsAppSettings(store, db);
+  const whatsappSettings = await loadWhatsAppSettings(db);
 
   return {
     proforma,

@@ -15,6 +15,19 @@ export const ErrorCode = {
   API_METHOD_NOT_ALLOWED: 'API_METHOD_NOT_ALLOWED',
   API_NOT_FOUND: 'API_NOT_FOUND',
 
+  // ── Application authorization ────────────────────────────────────────
+  // Distinct authorization failures for the shared-store auth model.
+  EMAIL_VERIFICATION_REQUIRED: 'EMAIL_VERIFICATION_REQUIRED',
+  AUTH_CONTEXT_INVALID: 'AUTH_CONTEXT_INVALID',
+  APP_ACCESS_REQUIRED: 'APP_ACCESS_REQUIRED',
+  OWNER_REQUIRED: 'OWNER_REQUIRED',
+  ACCOUNT_BLOCKED: 'ACCOUNT_BLOCKED',
+  USER_ALREADY_EXISTS: 'USER_ALREADY_EXISTS',
+  USER_INVITE_FAILED: 'USER_INVITE_FAILED',
+  USER_NOT_FOUND: 'USER_NOT_FOUND',
+  USER_ACTION_INVALID: 'USER_ACTION_INVALID',
+  USER_ACTION_FAILED: 'USER_ACTION_FAILED',
+
   // ── WhatsApp ─────────────────────────────────────────────────────────
   WHATSAPP_NOT_CONNECTED: 'WHATSAPP_NOT_CONNECTED',
   WHATSAPP_CONNECTION_FAILED: 'WHATSAPP_CONNECTION_FAILED',
@@ -59,6 +72,17 @@ export const ERROR_HTTP_STATUS: Readonly<Record<ErrorCodeValue, number>> = Objec
   API_METHOD_NOT_ALLOWED: 405,
   API_NOT_FOUND: 404,
 
+  EMAIL_VERIFICATION_REQUIRED: 403,
+  AUTH_CONTEXT_INVALID: 403,
+  APP_ACCESS_REQUIRED: 403,
+  OWNER_REQUIRED: 403,
+  ACCOUNT_BLOCKED: 403,
+  USER_ALREADY_EXISTS: 409,
+  USER_INVITE_FAILED: 502,
+  USER_NOT_FOUND: 404,
+  USER_ACTION_INVALID: 409,
+  USER_ACTION_FAILED: 502,
+
   WHATSAPP_NOT_CONNECTED: 503,
   WHATSAPP_CONNECTION_FAILED: 503,
   WHATSAPP_AUTH_INVALID: 401,
@@ -96,6 +120,18 @@ export const ERROR_DEFAULT_MESSAGE: Readonly<Record<ErrorCodeValue, string>> = O
   API_REQUEST_TOO_LARGE: 'The request body exceeds the maximum allowed size.',
   API_METHOD_NOT_ALLOWED: 'The HTTP method is not allowed for this endpoint.',
   API_NOT_FOUND: 'The requested endpoint was not found.',
+
+  EMAIL_VERIFICATION_REQUIRED: 'Verify your email address before accessing FUSION ONE.',
+  AUTH_CONTEXT_INVALID:
+    'This session cannot access FUSION ONE. Sign in with your password to continue.',
+  APP_ACCESS_REQUIRED: 'You do not have access to FUSION ONE.',
+  OWNER_REQUIRED: 'Owner access is required for this operation.',
+  ACCOUNT_BLOCKED: 'Your FUSION ONE account has been blocked by the store owner.',
+  USER_ALREADY_EXISTS: 'An account with this email already exists.',
+  USER_INVITE_FAILED: 'Failed to send the invitation email. Please try again.',
+  USER_NOT_FOUND: 'This user does not exist.',
+  USER_ACTION_INVALID: 'This action is not available for this user.',
+  USER_ACTION_FAILED: 'The user operation failed. Please try again.',
 
   WHATSAPP_NOT_CONNECTED: 'WhatsApp is not connected.',
   WHATSAPP_CONNECTION_FAILED: 'WhatsApp connection failed.',

@@ -21,6 +21,12 @@ export interface AuthenticatedUser {
   /** The verified access token — used for user-context Supabase requests
    *  (publishable key + this JWT + RLS). Never echoed back to clients. */
   token: string;
+  /** The authentication method from the VERIFIED JWT's amr claim
+   *  ('password' for a normal application login, 'otp' for an
+   *  invitation/recovery email-link session, null when absent — fail
+   *  closed downstream). This is a server-verified claim, never a
+   *  client-submitted value. */
+  amrMethod: string | null;
 }
 
 declare module 'fastify' {
@@ -65,7 +71,17 @@ export async function verifySupabaseToken(token: string): Promise<AuthenticatedU
     }
     const email =
       typeof payload.email === 'string' ? payload.email : null;
-    return { id, email, token };
+    // Authentication context from the verified claims: amr[0].method is
+    // 'password' for a normal application login and 'otp' for an
+    // invitation/recovery (email-link) session — the claim Supabase issues
+    // and preserves across token refresh (verified live against the TEST
+    // project). Absent claim → null → treated as non-password downstream.
+    const amr = Array.isArray(payload.amr) ? payload.amr : null;
+    const amrMethod =
+      amr && typeof amr[0] === 'object' && amr[0] !== null && typeof (amr[0] as { method?: unknown }).method === 'string'
+        ? (amr[0] as { method: string }).method
+        : null;
+    return { id, email, token, amrMethod };
   } catch (err) {
     if (err instanceof AppError) throw err;
     throw new AppError(ErrorCode.API_AUTH_INVALID, {

@@ -11,9 +11,20 @@ const ConfigSchema = z.object({
   host: z.string().min(1),
 
   /** Supabase user-identity access model: publishable key + the requesting
-   *  user's JWT (RLS enforces the data boundary). No secret key exists. */
+   *  user's JWT (RLS enforces the data boundary) for ordinary reads/writes. */
   supabaseUrl: z.string().url(),
   supabasePublishableKey: z.string().min(1),
+
+  /** Server-only Supabase secret key. Used EXCLUSIVELY by privileged Auth
+   *  administration (owner-controlled user invitations / user listing) —
+   *  never for ordinary business operations, never sent to any frontend.
+   *  Empty = user management endpoints fail closed with a clear error. */
+  supabaseSecretKey: z.string().default(''),
+
+  /** Public origin of the frontend app (invitation / password-reset email
+   *  links redirect here). Required by the invite endpoint; empty = fail
+   *  closed with a clear error. */
+  appBaseUrl: z.string().default(''),
 
   /** CORS: allowed browser origins (comma-separated). "*" only for dev sandboxes. */
   allowedOrigins: z.array(z.string().min(1)).min(1),
@@ -75,6 +86,8 @@ function parseEnv(): unknown {
     host: str(process.env.HOST, '0.0.0.0'),
     supabaseUrl: str(process.env.SUPABASE_URL),
     supabasePublishableKey: str(process.env.SUPABASE_PUBLISHABLE_KEY),
+    supabaseSecretKey: str(process.env.SUPABASE_SECRET_KEY),
+    appBaseUrl: str(process.env.APP_BASE_URL).replace(/\/+$/, ''),
     allowedOrigins: str(process.env.CLIENT_ORIGIN, 'http://localhost:5173')
       .split(',')
       .map((o) => o.trim())
