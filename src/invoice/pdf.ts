@@ -418,13 +418,21 @@ export async function buildInvoice(doc: PDFDocument, data: InvoiceData): Promise
   if (Number(data.discount) > 0) addTotal('Total Discount', `\u2013 ${fmt(Number(data.discount))}`, true);
   if (Number(data.trade_in_credit) > 0) addTotal('Trade-In Deduction', `\u2013 ${fmt(Number(data.trade_in_credit))}`);
 
-  // Grand total (black bar, gold value)
+  // Grand total (black bar, gold value).
+  // Vertical centering: PDFKit anchors the first line's baseline at
+  // y + ascender·size/1000 and, for the standard Helvetica faces, the
+  // ascender (718/1000 em) equals the cap height — the visible box of these
+  // all-caps/digit strings therefore spans [y, y + 0.718·size]. Anchoring
+  // that box on the bar's midline (instead of pinning its top edge with a
+  // fixed offset) keeps the top/bottom gaps balanced for both font sizes
+  // and every amount width.
   totY += 4.5;
+  const gtMidY = totY + L.gtBlockH / 2;
   doc.rect(rightCol, totY, totalsW, L.gtBlockH).fill(C.black);
   doc.font('Helvetica-Bold').fontSize(8.25).fillColor(C.white);
-  doc.text('GRAND TOTAL', rightCol + 12, totY + 10.5, { characterSpacing: 0.75 });
+  doc.text('GRAND TOTAL', rightCol + 12, gtMidY - (718 / 2000) * 8.25, { characterSpacing: 0.75 });
   doc.font('Helvetica-Bold').fontSize(11.25).fillColor(C.gold);
-  doc.text(fmt(data.final_total), rightCol, totY + 8.5, { width: totalsW - 12, align: 'right', characterSpacing: 0.375 });
+  doc.text(fmt(data.final_total), rightCol, gtMidY - (718 / 2000) * 11.25, { width: totalsW - 12, align: 'right', characterSpacing: 0.375 });
   totY += L.gtBlockH;
 
   if (data.type !== 'proforma') {
@@ -444,7 +452,13 @@ export async function buildInvoice(doc: PDFDocument, data: InvoiceData): Promise
   doc.text(`For ${storeNameSig}`, sigX, currentY);
   let sigCursorY = currentY + 31.5;
   if (branding.signature) {
-    doc.image(branding.signature, sigX, sigCursorY, { fit: [75, 30], align: 'center' });
+    // The signature image occupies the SAME centered column as the line and
+    // the texts below it: the 75×30 fit box (aspect preserved for any asset
+    // dimensions) is centered over the block, and align/valign center the
+    // scaled image inside that box.
+    doc.image(branding.signature, sigX + (L.sigBlockW - 75) / 2, sigCursorY, {
+      fit: [75, 30], align: 'center', valign: 'center',
+    });
     sigCursorY += 33.75;
   } else {
     sigCursorY += 8;
