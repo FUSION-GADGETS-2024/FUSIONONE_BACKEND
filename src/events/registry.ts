@@ -12,7 +12,8 @@ export const EventType = {
   WHATSAPP_STATE_CHANGED: 'WHATSAPP_STATE_CHANGED',
   WHATSAPP_QR_AVAILABLE: 'WHATSAPP_QR_AVAILABLE',
   WHATSAPP_QR_COUNTDOWN: 'WHATSAPP_QR_COUNTDOWN',
-  SEND_INVOICE_RESULT: 'SEND_INVOICE_RESULT',
+  MESSAGE_SEND_RESULT: 'MESSAGE_SEND_RESULT',
+  MESSAGE_JOB_RESULT: 'MESSAGE_JOB_RESULT',
   SECURITY_EVENT: 'SECURITY_EVENT',
 } as const;
 
@@ -49,10 +50,25 @@ const DATA_SCHEMAS: Readonly<Record<EventTypeValue, z.ZodTypeAny>> = {
     remainingSeconds: z.number().int().min(0),
     expiresAt: z.string(),
   }),
-  SEND_INVOICE_RESULT: z.object({
+  MESSAGE_SEND_RESULT: z.object({
     requestId: z.string().min(1),
     recipient: z.string().min(1),
     result: z.enum(['success', 'failed']),
+    errorCode: z.string().optional(),
+  }),
+  /** Durable message-job outcome (auto-send / reminder / receipt /
+   *  statement). The persistent truth is the message_jobs table; this event
+   *  is the live UI notification that a job settled. `trigger` separates
+   *  scheduler-picked executions ('automatic' — fire-and-forget, so the SSE
+   *  event is the user-feedback channel) from user-awaiting manual inline
+   *  executions ('manual' — their HTTP responses carry the UI feedback). */
+  MESSAGE_JOB_RESULT: z.object({
+    jobId: z.string().uuid(),
+    jobType: z.enum(['invoice_send', 'reminder', 'receipt', 'statement']),
+    refType: z.enum(['sale', 'purchase', 'proforma', 'payment_in', 'payment_out']),
+    refId: z.string().uuid(),
+    trigger: z.enum(['automatic', 'manual']),
+    result: z.enum(['succeeded', 'failed', 'cancelled', 'retrying']),
     errorCode: z.string().optional(),
   }),
   SECURITY_EVENT: z.object({

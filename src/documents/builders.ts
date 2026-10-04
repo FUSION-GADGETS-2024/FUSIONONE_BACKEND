@@ -1,24 +1,33 @@
 /**
- * Invoice data assembly. The business math is preserved EXACTLY as it
- * renders in production (a faithful port of the proven frontend
- * derivations):
+ * Document data builders — map raw Supabase rows into the canonical document
+ * models (InvoiceData / ReceiptData / StatementData) consumed by the renderers.
  *
+ * The business math is preserved EXACTLY as it renders in production:
  *   - per-line qty = 1
  *   - rate = inventory_items.base_selling_price (fallback sold_price) for sales
  *   - discount = max(0, base − sold)
  *   - displayed subtotal = Σ base_selling_price (NOT sales.total = Σ sold_price)
- *   - item_discount = Σ line discounts
- *   - discount = item_discount + additional discount
+ *   - item_discount = Σ line discounts; discount = item + additional
  *   - trade-in rate = credit_value (mrp carried separately)
  *
  * PostgREST NUMERIC columns arrive as strings — every value is coerced
  * through n() so no NaN or string-concatenation bugs can occur.
  */
-import type { InvoiceData, InvoiceLineItem, InvoiceTradeIn } from './types.js';
+import type {
+  InvoiceData,
+  InvoiceLineItem,
+  InvoiceTradeIn,
+  PaymentDirection,
+  ReceiptData,
+  StatementData,
+} from './types.js';
+import type { PaymentReceiptRows, PaymentStatementRows } from './repository.js';
 
 function n(v: unknown): number {
   return Number(v) || 0;
 }
+
+// ─── Invoices ───────────────────────────────────────────────────────────────
 
 export function buildSaleInvoiceData({
   sale,
@@ -160,5 +169,78 @@ export function buildProformaInvoiceData({
     paid: 0,
     due: n(proforma.final_total),
     trade_ins: mappedTradeIns,
+  };
+}
+
+// ─── Payment documents ──────────────────────────────────────────────────────
+
+/** Deterministic receipt identifier: RCP-{IN|OUT}-{YYYYMMDD}-{id prefix}. */
+export function buildReceiptNumber(paymentId: string, direction: PaymentDirection, date: string): string {
+  const compactDate = (date || '').replace(/-/g, '');
+  return `RCP-${direction === 'in' ? 'IN' : 'OUT'}-${compactDate}-${paymentId.replace(/-/g, '').slice(0, 8).toUpperCase()}`;
+}
+
+export function buildPaymentReceiptData(
+  direction: PaymentDirection,
+  { payment, invoice, store }: PaymentReceiptRows,
+): ReceiptData {
+  const invoiceTotal = invoice ? n(direction === 'in' ? invoice.final_total : invoice.total) : null;
+
+  return {
+    kind: 'receipt',
+    direction,
+    store,
+    receipt_number: buildReceiptNumber(payment.id, direction, payment.date),
+    date: payment.date,
+    party: payment.parties ?? null,
+    amount: n(payment.amount),
+    payment_mode: payment.payment_modes?.name ?? null,
+    bank_account: payment.bank_accounts?.name ?? null,
+    invoice_number: invoice?.bill_number ?? null,
+    invoice_date: invoice?.date ?? null,
+    invoice_total: invoiceTotal,
+    invoice_paid: invoice ? n(invoice.paid) : null,
+    invoice_due: invoice ? n(invoice.due) : null,
+  };
+}
+
+/** Deterministic statement identifier: STM-{IN|OUT}-{YYYYMMDD}-{invoice prefix}. */
+export function buildStatementNumber(invoiceId: string, direction: PaymentDirection, date: string): string {
+  const compactDate = (date || '').replace(/-/g, '');
+  return `STM-${direction === 'in' ? 'IN' : 'OUT'}-${compactDate}-${invoiceId.replace(/-/g, '').slice(0, 8).toUpperCase()}`;
+}
+
+/** The statement composition date (today, YYYY-MM-DD — the history it lists
+ *  is CURRENT state; the number/date pair identifies the document instance). */
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+export function buildPaymentStatementData(
+  direction: PaymentDirection,
+  { invoice, payments, store }: PaymentStatementRows,
+): StatementData {
+  const invoiceTotal = n(direction === 'in' ? invoice.final_total : invoice.total);
+
+  return {
+    kind: 'statement',
+    direction,
+    store,
+    statement_number: buildStatementNumber(invoice.id, direction, today()),
+    date: today(),
+    party: invoice.parties ?? null,
+    invoice_number: invoice.bill_number ?? null,
+    invoice_date: invoice.date ?? null,
+    invoice_total: invoiceTotal,
+    // The FULL payment history, oldest first — including the initial payment
+    // recorded during invoice/bill creation.
+    payments: (payments ?? []).map((p: any) => ({
+      date: p.date,
+      amount: n(p.amount),
+      payment_mode: p.payment_modes?.name ?? null,
+    })),
+    // Authoritative aggregates — never recomputed from the payment list.
+    total_paid: n(invoice.paid),
+    balance_due: n(invoice.due),
   };
 }

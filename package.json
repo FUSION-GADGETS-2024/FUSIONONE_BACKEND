@@ -10,7 +10,8 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "db:push": "echo \"[db:push] No Prisma database in this project (the FUSION ONE backend uses file-based Baileys auth state).\""
+    "db:push": "echo \"[db:push] No Prisma database in this project (the FUSION ONE backend uses file-based Baileys auth state).\"",
+    "test": "bun test"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",

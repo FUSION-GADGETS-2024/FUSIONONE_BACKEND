@@ -47,6 +47,12 @@ export const ErrorCode = {
   INVOICE_PDF_GENERATION_FAILED: 'INVOICE_PDF_GENERATION_FAILED',
   INVOICE_SEND_FAILED: 'INVOICE_SEND_FAILED',
 
+  // Payments / durable delivery
+  PAYMENT_NOT_FOUND: 'PAYMENT_NOT_FOUND',
+  PAYMENT_DIRECTION_INVALID: 'PAYMENT_DIRECTION_INVALID',
+  REMINDER_NOT_ELIGIBLE: 'REMINDER_NOT_ELIGIBLE',
+  MESSAGE_JOB_CONFLICT: 'MESSAGE_JOB_CONFLICT',
+
   // ── Security ─────────────────────────────────────────────────────────
   SECURITY_POLICY_VIOLATION: 'SECURITY_POLICY_VIOLATION',
   SECURITY_IDENTITY_MISMATCH: 'SECURITY_IDENTITY_MISMATCH',
@@ -100,6 +106,11 @@ export const ERROR_HTTP_STATUS: Readonly<Record<ErrorCodeValue, number>> = Objec
   INVOICE_PDF_GENERATION_FAILED: 500,
   INVOICE_SEND_FAILED: 502,
 
+  PAYMENT_NOT_FOUND: 404,
+  PAYMENT_DIRECTION_INVALID: 400,
+  REMINDER_NOT_ELIGIBLE: 409,
+  MESSAGE_JOB_CONFLICT: 409,
+
   SECURITY_POLICY_VIOLATION: 403,
   SECURITY_IDENTITY_MISMATCH: 403,
   SECURITY_SESSION_CORRUPTED: 500,
@@ -146,9 +157,14 @@ export const ERROR_DEFAULT_MESSAGE: Readonly<Record<ErrorCodeValue, string>> = O
   STORE_NOT_CONFIGURED: 'No store is configured for this deployment. Create a store before sending invoices.',
   STORE_CONFIGURATION_AMBIGUOUS: 'Multiple stores exist; the store cannot be determined unambiguously.',
   PARTY_PHONE_MISSING: 'The invoice party does not have a phone number on file.',
-  WHATSAPP_TEMPLATE_MISSING: 'No WhatsApp message template is configured for this document type. Set one in Settings → WhatsApp Delivery.',
+  WHATSAPP_TEMPLATE_MISSING: 'No WhatsApp message template is configured for this document type. Set one in Settings → WhatsApp.',
   INVOICE_PDF_GENERATION_FAILED: 'Failed to generate the invoice PDF.',
   INVOICE_SEND_FAILED: 'Failed to send the invoice.',
+
+  PAYMENT_NOT_FOUND: 'The requested payment was not found.',
+  PAYMENT_DIRECTION_INVALID: 'The payment direction is invalid. Allowed: in, out.',
+  REMINDER_NOT_ELIGIBLE: 'This invoice is not eligible for a payment reminder (fully paid or cancelled).',
+  MESSAGE_JOB_CONFLICT: 'A message for this document is already being sent.',
 
   SECURITY_POLICY_VIOLATION: 'A security policy violation was detected.',
   SECURITY_IDENTITY_MISMATCH: 'The connected WhatsApp identity does not match the expected identity.',

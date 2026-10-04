@@ -1,22 +1,14 @@
 /**
- * Shared Prestige visual specification — the SINGLE source of truth for the
- * invoice look, consumed by BOTH renderers:
+ * Prestige shared document theme — the single source of truth for the visual
+ * design of every FUSION ONE document (Invoice, Payment Receipt, Payment
+ * Statement), consumed by the PDF renderers and the thumbnail worker.
  *
- *   - `pdf.ts`      (PDFKit — the authoritative invoice document)
- *   - `thumbnail.ts` (Canvas worker — the WhatsApp chat-bubble preview)
- *
- * This module exists so the thumbnail is a faithful crop of the SAME design
- * instead of a re-interpretation: colors, layout geometry, column widths,
- * font sizes, and the item-text formatting helpers all come from here.
- *
- * RULES:
- *   - Pure data + pure functions only. No I/O, no database, no business
- *     calculations (no totals/discount math — those live in builders.ts and
- *     arrive already composed inside InvoiceData).
+ * Rules:
+ *   - Pure data + pure functions only. No I/O, no business calculations.
  *   - The thumbnail worker (a separate plain-Node process) cannot import
- *     TypeScript modules; `thumbnail.ts` therefore serializes
- *     PRESTIGE_COLORS + PRESTIGE_LAYOUT into the worker's environment. Keep
- *     both objects JSON-serializable.
+ *     TypeScript modules; thumbnail.ts serializes PRESTIGE_COLORS +
+ *     PRESTIGE_LAYOUT into the worker's environment. Keep both objects
+ *     JSON-serializable.
  */
 import type { InvoiceLineItem, InvoiceTradeIn, InvoiceType } from './types.js';
 
@@ -81,8 +73,8 @@ export const PRESTIGE_LAYOUT = {
 } as const;
 
 // ── Prestige header icons (SVG paths, 24-unit viewBox scaled to 10pt) ─────
-// Consumed by the PDF renderer (pdf.ts) and injected into the thumbnail
-// worker via THUMB_SPEC so both draw identical gold contact icons.
+// Consumed by the PDF renderer and injected into the thumbnail worker via
+// THUMB_SPEC so both draw identical gold contact icons.
 
 export const PRESTIGE_ICONS = {
   phone:

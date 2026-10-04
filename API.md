@@ -10,18 +10,20 @@ the backend source code.
 
 The FUSION ONE Backend is the dedicated application backend for FUSION ONE —
 a Node.js + TypeScript server that owns the complete WhatsApp lifecycle using
-Baileys, the invoice delivery pipeline, and user management. It provides:
+Baileys, the document/message pipeline, and user management. It provides:
 
 - **Automatic WhatsApp onboarding** — the backend generates QR codes and manages
   pairing. The client never starts or initializes WhatsApp.
 - **Real-time state updates** — via Server-Sent Events (SSE), the backend pushes
   state changes, QR availability, send results, and security events to connected
   clients.
-- **Invoice document sending** — the `sendInvoice` operation sends ONE WhatsApp
-  **document** message: the invoice PDF (`application/pdf`, filename
-  `<bill_number>.pdf`) with the resolved message template as its caption and a
-  JPEG preview thumbnail. The backend owns the invoice pipeline — the client
-  supplies only the invoice reference (`invoiceId` + `invoiceType`).
+- **Document message sending** — every message kind (invoice, payment
+  receipt, payment statement, reminder) sends ONE WhatsApp **document**
+  message: the document PDF (`application/pdf`, filename
+  `<document-number>.pdf`) with the resolved message template as its caption
+  and a JPEG preview thumbnail — all document kinds through the SAME
+  document preparation pipeline. The backend owns the entire pipeline — the
+  client supplies only the business-object reference.
 - **Session management** — logout destroys the WhatsApp session and switches
   Baileys OFF; the state stays `IDLE` (no session) until an explicit
   `POST /api/whatsapp/login`.
@@ -44,7 +46,7 @@ Baileys, the invoice delivery pipeline, and user management. It provides:
 | `PORT` / `HOST` | HTTP server bind (default 3000 / 0.0.0.0) |
 | `SUPABASE_URL` | Supabase project URL (authoritative invoice data) |
 | `SUPABASE_PUBLISHABLE_KEY` | Supabase publishable key — combined with the requesting user's JWT for every data access (RLS-enforced). |
-| `SUPABASE_SECRET_KEY` | Server-only Supabase secret key, used EXCLUSIVELY by owner-controlled Auth administration (user invitations / user listing). Never used for ordinary business reads/writes, never exposed to any frontend. Empty/unset = user-management endpoints fail closed. |
+| `SUPABASE_SECRET_KEY` | Server-only Supabase secret key — the SYSTEM-CONTEXT credential, used for exactly two system-level responsibilities: owner-controlled Auth administration (user invitations / user listing) and the durable message system (scheduler job state + background business-data loads for job execution). Never used for user-requested business reads/writes (those run under the CALLER's JWT + RLS), never exposed to any frontend. Empty/unset = user management AND the message scheduler fail closed. |
 | `APP_BASE_URL` | Public origin of the frontend app — invitation / password-reset email links redirect to `<APP_BASE_URL>/set-password`. |
 | `CLIENT_ORIGIN` | Allowed CORS browser origins (comma-separated list; `*` for dev sandboxes only) |
 | `WHATSAPP_AUTH_DIR` | Baileys auth state storage (default `./data/whatsapp/auth`) |
@@ -52,7 +54,9 @@ Baileys, the invoice delivery pipeline, and user management. It provides:
 | `WHATSAPP_CLIENT_DISCONNECT_GRACE_MS` | Runtime retention: after the LAST authenticated frontend client disconnects (and no other runtime demand exists), the Baileys runtime keeps running for this long before the intentional stop (session preserved). Default 300000 (5 minutes). |
 | `WHATSAPP_WAKE_TIMEOUT_MS` | Bounded wait for a runtime wake to reach `CONNECTED` |
 | `REDIS_URL` / `WHATSAPP_BACKUP_ENCRYPTION_KEY` | Encrypted Redis session backup (recovery replica) — required together when set |
-| `SEND_TIMEOUT_MS` / `SEND_MAX_RETRIES` / `SEND_RETRY_BASE_MS` | Send pipeline tuning |
+| `SEND_TIMEOUT_MS` / `SEND_MAX_RETRIES` / `SEND_RETRY_BASE_MS` | Send pipeline tuning (TRANSPORT-level retries within one message execution — separate from durable job retries) |
+| `MESSAGE_POLL_INTERVAL_MS` | Durable message scheduler: due-job scan interval (default 15000, min 5000). |
+| `MESSAGE_JOB_LEASE_MS` | Durable message scheduler: claim lease (default 300000, min 30000). A claimed-but-unfinished job whose lease expired is recovered (made retryable) by the next scan. Must exceed worst-case job execution (send timeout × retries + PDF + thumbnail generation). |
 | `MAX_REQUEST_BODY_BYTES` | Request body limit (default 10 MB) |
 | `LOG_LEVEL` | pino log level |
 | `PING_TOKEN` | Secret for the `GET /ping` wakeup probe (checked via the `X-Ping-Token` request header). Environment-only — never exposed to any frontend. Unset/empty = `/ping` always returns 401 (fail closed). |
@@ -188,7 +192,12 @@ user-specific.
 | `GET /api/events` (SSE) | **Yes** (valid user JWT) | Authorized app user (owner or user) |
 | `POST /api/whatsapp/login` | **Yes** (valid user JWT) | **Owner only** (shared-connection configuration) |
 | `POST /api/whatsapp/cancelPairing` | **Yes** (valid user JWT) | Authorized app user |
-| `POST /api/whatsapp/sendInvoice` | **Yes** (valid user JWT) | Authorized app user (shared business operation) |
+| `POST /api/messages/sendInvoice` | **Yes** (valid user JWT) | Authorized app user (shared business operation) |
+| `POST /api/messages/autoSend` | **Yes** (valid user JWT) | Authorized app user (arms the durable server-side auto-send) |
+| `POST /api/messages/sendReceipt` | **Yes** (valid user JWT) | Authorized app user (manual payment receipt message) |
+| `POST /api/messages/sendStatement` | **Yes** (valid user JWT) | Authorized app user (manual payment statement message) |
+| `POST /api/messages/sendReminder` | **Yes** (valid user JWT) | Authorized app user (manual reminder trigger) |
+| `PUT /api/messages/reminder-settings/:saleId` | **Yes** (valid user JWT) | Authorized app user (per-invoice reminder configuration) |
 | `POST /api/whatsapp/logout` | **Yes** (valid user JWT) | **Owner only** (shared-session destruction) |
 | `GET /api/users` | **Yes** (valid user JWT) | **Owner only** |
 | `POST /api/users/invite` | **Yes** (valid user JWT) | **Owner only** |
@@ -507,7 +516,7 @@ ends an abandoned pairing (last client gone + grace expired).
 
 ---
 
-### POST /api/whatsapp/sendInvoice
+### POST /api/messages/sendInvoice
 
 **Purpose:** Send an invoice **by reference** — the backend owns the entire
 invoice pipeline. It loads the authoritative invoice data from Supabase,
@@ -550,21 +559,22 @@ error — it must not be used.
    the invoice type (placeholders substituted with authoritative data; no
    hardcoded fallback — a missing template fails with
    `WHATSAPP_TEMPLATE_MISSING`)
-4. Renders the invoice PDF with PDFKit (Prestige design) **concurrently**
-   with the chat preview (below) — both are generated from the same
-   canonical `InvoiceData` in parallel (`Promise.all`)
+4. Prepares the document through the unified pipeline: the PDF (PDFKit,
+   Prestige design) renders **concurrently** with the chat preview — both
+   from the same canonical document data (`Promise.all`)
 5. Renders the WhatsApp chat-bubble preview: a crisp JPEG of the
-   **upper section of the same Prestige design** (store header, billing/
-   meta, items table with the first complete rows — never a clipped row),
-   drawn by a **persistent isolated Node canvas worker**
+   **upper section of the same Prestige design** (store header, party/meta
+   block, the document's leading content — only complete rows, never a
+   clipped row), drawn by a **persistent isolated Node canvas worker**
    (`@napi-rs/canvas`, spawned once at backend startup; never inside the
-   Bun process). It is embedded as the document's `jpegThumbnail` so the
-   chat bubble shows the invoice preview, exactly like a manually attached
-   PDF. Purely cosmetic: any generation failure (worker crash, timeout,
-   render error) logs a warning and the invoice is still sent as a PDF
-   without a preview — a preview failure can never fail a send
+   Bun process). EVERY document kind (invoice, receipt, statement) renders
+   its preview through this same worker. It is embedded as the document's
+   `jpegThumbnail` so the chat bubble shows the preview, exactly like a
+   manually attached PDF. Purely cosmetic: any generation failure (worker
+   crash, timeout, render error) logs a warning and the document is still
+   sent as a PDF without a preview — a preview failure can never fail a send
 6. Sends **one** WhatsApp document message: the PDF attachment
-   (`application/pdf`, filename `<bill_number>.pdf`) with the resolved
+   (`application/pdf`, filename `<document-number>.pdf`) with the resolved
    message as its caption and the upper-section preview as its thumbnail —
    never a separate text message, never an image
 
@@ -596,6 +606,163 @@ error — it must not be used.
 - `504 WHATSAPP_SEND_TIMEOUT` — send operation timed out
 
 See [sendInvoice API](#7-sendinvoice-api) for more details.
+
+---
+
+### POST /api/messages/autoSend
+
+**Purpose:** Arm the DURABLE server-side auto-send for a freshly created
+invoice. The backend re-validates the matching `whatsapp_settings.auto_send_*`
+flag under the caller's identity (the browser's read is UX only), creates a
+due-now `invoice_send` message job, and returns immediately — the scheduler
+executes it (browser-independent, restart-safe, retried on failure). This
+replaced the old browser sessionStorage intent entirely.
+
+**Headers:**
+```
+Authorization: Bearer <Supabase access token>
+Content-Type: application/json
+```
+
+**Request body** (same reference-only contract as sendInvoice):
+```json
+{ "invoiceId": "<uuid>", "invoiceType": "sale" }
+```
+
+**Responses:**
+- `202` `{ "success": true, "created": true, "jobId": "<uuid>" }` — job created; execution is in progress (the outcome arrives as a `MESSAGE_JOB_RESULT` SSE event and is persisted in `message_jobs`).
+- `200` `{ "success": true, "created": false, "reason": "disabled" }` — the auto-send flag is off server-side; nothing was created.
+- `200` `{ "success": true, "created": false, "reason": "already_pending" }` — a pending/processing auto-send already exists (idempotent).
+- `401/403` — authentication/authorization failures (standard model).
+- `400 API_REQUEST_INVALID` / `INVALID_INVOICE_TYPE` — malformed request.
+- `503 SERVER_NOT_READY` — the durable message system is not configured (missing server credentials).
+
+---
+
+### POST /api/messages/sendReceipt
+
+**Purpose:** Manually send a payment receipt on WhatsApp — the Payments
+dialog / Payments page action. Receipts are ALSO sent automatically for
+SUBSEQUENT payments (a later payment against an existing invoice/bill) when
+the store's `auto_send_receipt_in` / `auto_send_receipt_out` switch is ON:
+those jobs are created TRANSACTIONALLY inside the `receive_payment` /
+`pay_purchase` RPCs (migration 0007) and executed by the scheduler — this
+endpoint is the manual path. The frontend identifies the payment; the
+backend resolves the authoritative payment record, the linked invoice's
+CURRENT totals, the party, the template, renders the receipt PDF (the
+shared Prestige document system), and delivers it through the same
+SendController/WhatsAppManager transport. A receipt message failure NEVER
+affects the recorded payment.
+
+**Headers:**
+```
+Authorization: Bearer <Supabase access token>
+Content-Type: application/json
+```
+
+**Request body:**
+```json
+{ "paymentId": "<uuid>", "direction": "in" }
+```
+`direction` is `in` (payments_in) or `out` (payments_out). No financial
+payload is accepted — amounts, dates and references always come from the
+database.
+
+**Responses:**
+- `200` `{ "success": true, "status": "succeeded", "jobId": "<uuid>" }` — the receipt was delivered; the durable job record persists the outcome.
+- `200` `{ "success": false, "status": "pending", "jobId": "...", "error": "..." }` — the message failed retryably (e.g. WhatsApp not connected); the job retries automatically with backoff.
+- `200` `{ "success": true, "status": "processing", "jobId": "..." }` — the scheduler claimed the job concurrently; it is already executing.
+- `200` `{ "success": false, "status": "failed" | "cancelled", "jobId": "...", "error": "..." }` — terminal outcome (invalid recipient, missing template, …).
+- `409 MESSAGE_JOB_CONFLICT` — a receipt for this payment is already being delivered (double-click guard; this may be the payment's own AUTOMATIC receipt).
+- `404 PAYMENT_NOT_FOUND` — no such payment (for the given direction).
+- `503 SERVER_NOT_READY` — the durable message system is not configured.
+
+---
+
+### POST /api/messages/sendStatement
+
+**Purpose:** Manually send the PAYMENT STATEMENT for an invoice/bill on
+WhatsApp — the Payments dialog's "Send Payment Statement" action. A
+statement represents ALL payments recorded against the invoice/bill
+(INCLUDING the initial payment made during invoice/bill creation), composed
+from CURRENT authoritative data at send time: the payment list comes from
+the payment records and the aggregates (total paid / balance due) come from
+the invoice row (`sales.paid/due`, `purchases.paid/due`) — never a stale
+snapshot, never recomputed in the browser. Statements are MANUAL ONLY: no
+payment operation ever creates one. The document is rendered by the same
+shared Prestige renderer (STM-… number) and delivered through the same
+transport. A message failure NEVER affects the recorded payments.
+
+**Headers:**
+```
+Authorization: Bearer <Supabase access token>
+Content-Type: application/json
+```
+
+**Request body:**
+```json
+{ "invoiceId": "<uuid>", "invoiceType": "sale" }
+```
+`invoiceType` is `sale` (statement In) or `purchase` (statement Out);
+proforma is rejected (no payments). No financial payload is accepted.
+
+**Responses:** the same outcome shapes as `sendReceipt`, with:
+- `409 MESSAGE_JOB_CONFLICT` — a statement for this invoice is already being delivered. A LATER request (after the first job reached a terminal state) legitimately creates a fresh job — two intentionally separate user requests are not the same statement.
+- `404 INVOICE_NOT_FOUND` — no such sale/purchase.
+
+---
+
+### POST /api/messages/sendReminder
+
+**Purpose:** Manually trigger a payment reminder for a sale invoice NOW.
+Converges with the scheduled reminder path on the SAME message
+implementation: the backend pulls the scheduled reminder job forward to
+run_at = now (or creates a one-off job when no chain is configured), claims
+it, executes it, and returns the outcome. The reminder message always
+renders the invoice's CURRENT balance due.
+
+**Headers:**
+```
+Authorization: Bearer <Supabase access token>
+Content-Type: application/json
+```
+
+**Request body:**
+```json
+{ "saleId": "<uuid>" }
+```
+
+**Responses:** the same outcome shapes as `sendReceipt`, plus:
+- `409 REMINDER_NOT_ELIGIBLE` — the invoice is fully paid or cancelled.
+
+---
+
+### PUT /api/messages/reminder-settings/:saleId
+
+**Purpose:** Create or update the per-invoice reminder configuration. The
+backend validates the values, upserts the `reminder_settings` row, and
+atomically reconciles the durable next job: enabling (re)starts the chain
+only when the invoice is currently eligible (active + balance due + under
+the limit); disabling cancels pending reminder jobs. The dialog never
+schedules anything with client-side timers.
+
+**Headers:**
+```
+Authorization: Bearer <Supabase access token>
+Content-Type: application/json
+```
+
+**Request body:**
+```json
+{ "enabled": true, "frequencyDays": 7, "maxReminders": 3 }
+```
+(`frequencyDays` 1–365; `maxReminders` 1–50.)
+
+**Responses:**
+- `200` `{ "success": true, "config": { ... }, "jobCreated": bool, "jobsCancelled": int }` — the persisted configuration and the job reconciliation outcome.
+- `400 API_REQUEST_INVALID` — values out of range.
+- `404 INVOICE_NOT_FOUND` — no such sale.
+- `503 SERVER_NOT_READY` — the durable message system is not configured.
 
 ---
 
@@ -1074,14 +1241,14 @@ interfere with a newer one (generation-ID guarded).
 }
 ```
 
-#### SEND_INVOICE_RESULT
+#### MESSAGE_SEND_RESULT
 
 Emitted when a `sendInvoice` operation completes (success or failure).
 
 **Success:**
 ```json
 {
-  "type": "SEND_INVOICE_RESULT",
+  "type": "MESSAGE_SEND_RESULT",
   "timestamp": "...",
   "data": {
     "requestId": "req-1700000000-abcdef",
@@ -1094,7 +1261,7 @@ Emitted when a `sendInvoice` operation completes (success or failure).
 **Failure:**
 ```json
 {
-  "type": "SEND_INVOICE_RESULT",
+  "type": "MESSAGE_SEND_RESULT",
   "timestamp": "...",
   "data": {
     "requestId": "req-1700000000-abcdef",
@@ -1108,6 +1275,45 @@ Emitted when a `sendInvoice` operation completes (success or failure).
 The `recipient` field contains the normalized WhatsApp JID (not the original
 phone number input). The `errorCode` field is only present on failure and
 contains one of the registered error codes (see [Error Codes](#9-error-codes)).
+
+#### MESSAGE_JOB_RESULT
+
+Emitted when a durable message job settles (auto-send, reminder, receipt,
+or statement). The PERSISTENT truth is the `message_jobs` table (readable by
+authorized app users under RLS); this event is the optional live UI
+notification that a job finished — sent to every authenticated SSE client.
+
+```json
+{
+  "type": "MESSAGE_JOB_RESULT",
+  "timestamp": "...",
+  "data": {
+    "jobId": "0c7b5f8e-....",
+    "jobType": "reminder",
+    "refType": "sale",
+    "refId": "9d2c1a34-....",
+    "trigger": "automatic",
+    "result": "succeeded",
+    "errorCode": "WHATSAPP_SEND_FAILED: Failed to send the WhatsApp message."
+  }
+}
+```
+
+- `jobType` — `invoice_send` | `reminder` | `receipt` | `statement`.
+- `refType` / `refId` — the business object the job references
+  (`sale` / `purchase` / `proforma` / `payment_in` / `payment_out`).
+- `trigger` — `automatic` (the scheduler picked the job up: invoice
+  auto-send, reminder chain, or an AUTOMATIC receipt for a subsequent
+  payment — nobody awaits these, so this event is their user-feedback
+  channel) or `manual` (a user-awaiting inline execution whose HTTP response
+  carries the UI feedback).
+- `result` — `succeeded` | `retrying` | `failed` | `cancelled`
+  (`retrying` = a retryable failure; the job returned to `pending` with
+  backoff and will execute again; `cancelled` = the chain stopped: invoice
+  fully paid / cancelled / reminders disabled / limit reached / superseded
+  by a manual send).
+- `errorCode` — present on `failed` (and retry information is persisted on
+  the job row, not the event).
 
 #### SECURITY_EVENT
 
@@ -1135,7 +1341,7 @@ a human-readable description of the security violation.
 ### Endpoint
 
 ```
-POST /api/whatsapp/sendInvoice
+POST /api/messages/sendInvoice
 ```
 
 ### Purpose
@@ -1261,7 +1467,7 @@ HTTP 200
 ### Example Request
 
 ```bash
-curl -X POST http://localhost:3000/api/whatsapp/sendInvoice \
+curl -X POST http://localhost:3000/api/messages/sendInvoice \
   -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1295,7 +1501,161 @@ If the send does not complete within this time, it fails with
 
 ---
 
-## 8. Logout API
+## 8. Durable Message System (jobs, scheduler, receipts, reminders)
+
+### Overview
+
+All server-side message work runs through ONE durable job system:
+
+```
+Supabase (message_jobs + reminder_settings + business data)
+        ▲  due-job polling (periodic scan + poke)
+        │
+Fastify MessageScheduler  ──  discover → claim → execute → persist
+        │
+        ├── invoice_send  → invoice document (PDF + thumbnail) + template message
+        ├── reminder      → CURRENT sale check → invoice doc + reminder message
+        ├── receipt       → payment record → receipt doc (PDF + thumbnail)
+        └── statement     → invoice payment history → statement doc (PDF + thumbnail)
+        │
+        ▼
+existing SendController → WhatsAppManager (Baileys) — the ONE transport
+```
+
+- **message_jobs** is the single job table (no per-type tables, no Redis
+  queue, no external broker). Jobs reference business objects by typed
+  foreign keys and never copy financial payload — execution always composes
+  from CURRENT authoritative data.
+- **reminder_settings** is the per-invoice reminder configuration + durable
+  progress (one row per sale; `reminders_sent` counts DELIVERED reminders
+  only — attempts live on the job row).
+- Job state is SYSTEM-OWNED: `message_jobs` and `reminder_settings` are
+  SELECT-only for browser roles (RLS `can_access_app`); writes happen
+  exclusively through the backend via the service-role RPCs
+  (`claim_due_message_jobs`, `recover_expired_message_jobs`,
+  `complete_message_job`, `upsert_reminder_config`,
+  `trigger_reminder_now`), which are granted to `service_role` ONLY.
+- Ownership boundaries: user-requested operations load business data under
+  the CALLER's JWT (RLS — the established repository pattern); durable
+  background execution (the scheduler) and job state run under the
+  backend's system context. No privileged credential is ever exposed to
+  the browser.
+
+### Job lifecycle
+
+```
+pending ──claim (SKIP LOCKED, lease)──► processing ──success──► succeeded
+   ▲                                        │
+   │                                        ├──retry──► pending (run_at = now + backoff)
+   │                                        ├──fail───► failed (terminal)
+   │                                        └──cancel─► cancelled (chain stopped)
+   └── lease expired while processing ────────┘ (recovered automatically)
+```
+
+- **Claiming** is atomic (`FOR UPDATE SKIP LOCKED`): two scheduler
+  executions (or two backend processes during a deploy overlap) can never
+  execute the same job. `attempts` increments on every claim.
+- **Recovery** is continuous (every scan, not only startup): a
+  `processing` job whose `claim_expires_at` passed becomes `pending` again
+  with exponential backoff (60s × 2^(n−1), capped 1h) — or `failed` once
+  `attempts` reaches `max_attempts`. Claims are never blindly reset.
+- **Restart safety:** jobs live in PostgreSQL. A backend crash at 09:58 and
+  restart at 10:07 still executes a 10:00 job (the database IS the
+  schedule; no browser, timer, or memory involved).
+- **Idempotent creation:** partial unique indexes enforce at most ONE
+  pending/processing job per business object per job type — double-clicks,
+  re-arms, and retries cannot create duplicate future work.
+- **No DB transaction is held during WhatsApp operations**: the claim RPC
+  returns before execution; the lease covers the gap.
+
+### Job-level vs transport-level retries
+
+The SendController's existing behavior is unchanged and remains the
+TRANSPORT layer: serialized sends, per-attempt timeout, bounded in-request
+retries for `WHATSAPP_SEND_FAILED`. The JOB layer owns durable retry
+decisions: temporary unavailability (including `WHATSAPP_NOT_CONNECTED`,
+timeouts, internal errors) returns the job to `pending` with backoff;
+terminal conditions (invalid recipient, missing template/config, gone
+business objects) fail or cancel the job.
+
+### Reminder behavior
+
+- Reminders are configured PER INVOICE (sale invoices with an outstanding
+  balance). Enabling starts a next-job chain: the first job runs one
+  frequency interval after configuration; each successful reminder
+  increments `reminders_sent` and creates the next job ONLY if the invoice
+  is still active, still has `sales.due > 0`, and the configured maximum
+  has not been reached.
+- The reminder message always renders the invoice's CURRENT balance due
+  (never a frozen amount), and the reminder re-sends the invoice PDF with
+  the reminder message.
+- Manual ("Send Reminder Now") and scheduled reminders use the SAME
+  executor — the manual trigger simply pulls the scheduled job forward
+  (or creates a one-off when no chain is configured).
+- Full payment or cancellation stops the chain automatically; fully-paid
+  invoices never start one.
+
+### Payment receipts
+
+Receipts have TWO triggers, one document framework:
+
+- **Manual** — every payment (including the initial payment made during
+  invoice/bill creation) can be receipted at any time from the invoice's
+  Payments dialog or the Payments page (`POST /api/messages/sendReceipt`).
+- **Automatic (optional, per direction, default OFF)** — a SUBSEQUENT
+  payment (`receive_payment` / `pay_purchase`) creates its receipt job
+  TRANSACTIONALLY inside the payment RPC (via the private
+  `create_auto_receipt_job` SECURITY DEFINER bridge, migration 0007): the
+  payment, its accounting updates, and the job commit as ONE database
+  transaction — a closed browser or restarted backend can never lose the
+  job. The INITIAL payment recorded during `create_sale` /
+  `create_purchase` NEVER triggers an automatic receipt (the invoice/bill
+  message already carries it); the store switches are
+  `whatsapp_settings.auto_send_receipt_in` / `auto_send_receipt_out`.
+
+Both directions (`in`/`out`) use one receipt framework: the receipt
+represents the payment that occurred, prepared by the SHARED document
+pipeline (Prestige renderer + the same chat-preview thumbnail worker as
+invoices — no second renderer, no PDF-only path), delivered as ONE PDF
+document message with a caption from the `whatsapp_settings` receipt
+templates. A receipt
+failure never touches accounting state — the payment remains recorded
+regardless. Automatic receipt jobs are idempotent per payment (ONE
+pending/processing job; the manual endpoint converges on the same unique
+index).
+
+### Payment statements
+
+A Payment Statement represents the ENTIRE payment history of one
+invoice/bill — the deliberate counterpart to the one-payment receipt. It is
+MANUAL ONLY (no payment operation ever creates one), sent from the
+invoice's Payments dialog (`POST /api/messages/sendStatement`). The
+document lists EVERY payment (including the initial creation-time payment)
+with date/mode/amount, and its aggregates come from the AUTHORITATIVE
+invoice row (`sales.paid/due`, `purchases.paid/due`) — composed from CURRENT
+data at send time, never a stale snapshot. Rendered by the same shared
+Prestige renderer with the same PDF + chat-preview preparation as every
+other document (deterministic `STM-` number; `PAID IN FULL` state on a
+settled invoice) and a caption from the `payment_statement_in/out`
+templates. Idempotency: ONE pending/processing statement per invoice; a
+later request after a terminal outcome legitimately creates a fresh job.
+
+### Delivery semantics (honest disclosure)
+
+Delivery is AT-LEAST-ONCE: Baileys/WhatsApp cannot guarantee exactly-once
+transport, so a crash between transport acceptance and state persistence
+can produce a duplicate send after lease recovery. Claiming + idempotent
+creation minimize the window; no exactly-once claim is made.
+
+### Observability
+
+Structured logs cover job creation, claim, execution start, success,
+failure, retry scheduling, reminder stop reasons, receipt and statement
+composition/failures, auto-send execution, and scheduler start/stop. Empty
+scans are silent. Scheduler internals (ticks, claim counts, worker state)
+are backend implementation details — not exposed on any API.
+
+## 9. Logout API
 
 ### Endpoint
 
@@ -1357,9 +1717,9 @@ curl -X POST http://localhost:3000/api/whatsapp/logout \
 
 ---
 
-## 9. Error Codes
+## 10. Error Codes
 
-The backend exposes exactly **31 error codes**. No other error codes exist.
+The backend exposes exactly **35 error codes**. No other error codes exist.
 All error responses use the canonical envelope:
 
 ```json
@@ -1411,6 +1771,10 @@ Raw internal exceptions are never exposed — they are mapped to
 | `WHATSAPP_TEMPLATE_MISSING` | 503 | Template missing | No message template configured for this invoice type |
 | `INVOICE_PDF_GENERATION_FAILED` | 500 | PDF failed | Invoice PDF rendering failed |
 | `INVOICE_SEND_FAILED` | 502 | Send failed | Registered invoice-send failure code (reserved — current transport failures surface as `WHATSAPP_SEND_FAILED`) |
+| `PAYMENT_NOT_FOUND` | 404 | The requested payment was not found. |
+| `PAYMENT_DIRECTION_INVALID` | 400 | The payment direction is invalid. Allowed: in, out. |
+| `REMINDER_NOT_ELIGIBLE` | 409 | This invoice is not eligible for a payment reminder (fully paid or cancelled). |
+| `MESSAGE_JOB_CONFLICT` | 409 | A message for this document is already being sent. |
 
 ### Security Errors
 
@@ -1432,7 +1796,7 @@ Raw internal exceptions are never exposed — they are mapped to
 
 ---
 
-## 10. Client Implementation Guide
+## 11. Client Implementation Guide
 
 ### Recommended Client Flow
 
@@ -1461,8 +1825,8 @@ Raw internal exceptions are never exposed — they are mapped to
    → Show QR image when available
 
 6. Send invoice request
-   → POST /api/whatsapp/sendInvoice {invoiceId, invoiceType}
-   → Observe SEND_INVOICE_RESULT event for outcome
+   → POST /api/messages/sendInvoice {invoiceId, invoiceType}
+   → Observe MESSAGE_SEND_RESULT event for outcome
 
 7. Logout when required
    → POST /api/whatsapp/logout
@@ -1511,7 +1875,7 @@ Raw internal exceptions are never exposed — they are mapped to
 
 ---
 
-## 11. Example Client Flow
+## 12. Example Client Flow
 
 ### Startup
 
@@ -1543,7 +1907,7 @@ Client is ready to send invoices
 ```
 User clicks "Send on WhatsApp" for a saved invoice
     ↓
-POST /api/whatsapp/sendInvoice (Authorization header)
+POST /api/messages/sendInvoice (Authorization header)
     {
       "invoiceId": "d0bbf4b3-14f8-453a-bb59-55d4b7571610",
       "invoiceType": "sale"
@@ -1555,7 +1919,7 @@ message (application/pdf, <bill_number>.pdf, caption, JPEG preview)
     ↓
 HTTP 200 → { success: true, requestId: "...", messageId: "..." }
     ↓
-Receive SEND_INVOICE_RESULT → { result: "success", requestId: "...", recipient: "919123456789@s.whatsapp.net" }
+Receive MESSAGE_SEND_RESULT → { result: "success", requestId: "...", recipient: "919123456789@s.whatsapp.net" }
     ↓
 Display success to user
 ```
@@ -1563,7 +1927,7 @@ Display success to user
 ### Send Invoice Failure
 
 ```
-POST /api/whatsapp/sendInvoice (when not connected)
+POST /api/messages/sendInvoice (when not connected)
     ↓
 HTTP 503 → { error: { code: "WHATSAPP_NOT_CONNECTED", message: "WhatsApp is not connected." } }
     ↓

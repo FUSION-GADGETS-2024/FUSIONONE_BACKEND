@@ -56,6 +56,15 @@ const ConfigSchema = z.object({
   sendMaxRetries: z.number().int().min(0).max(10),
   sendRetryBaseMs: z.number().int().min(100),
 
+  /** Durable message scheduler: periodic due-job scan interval. */
+  messagePollIntervalMs: z.number().int().min(5000),
+
+  /** Durable message scheduler: claim lease. A claimed-but-unfinished job
+   *  whose lease expired is recovered (made retryable again) by the next
+   *  scan. Must exceed worst-case job execution (send timeout × retries +
+   *  PDF generation). */
+  messageJobLeaseMs: z.number().int().min(30000),
+
   maxRequestBodyBytes: z.number().int().min(1024),
 
   logLevel: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']),
@@ -100,6 +109,8 @@ function parseEnv(): unknown {
     sendTimeoutMs: num(process.env.SEND_TIMEOUT_MS, 30000),
     sendMaxRetries: num(process.env.SEND_MAX_RETRIES, 3),
     sendRetryBaseMs: num(process.env.SEND_RETRY_BASE_MS, 2000),
+    messagePollIntervalMs: num(process.env.MESSAGE_POLL_INTERVAL_MS, 15000),
+    messageJobLeaseMs: num(process.env.MESSAGE_JOB_LEASE_MS, 300000),
     maxRequestBodyBytes: num(process.env.MAX_REQUEST_BODY_BYTES, 10485760),
     logLevel: str(process.env.LOG_LEVEL, 'info') as AppConfig['logLevel'],
     pingToken: str(process.env.PING_TOKEN, ''),

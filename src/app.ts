@@ -16,11 +16,12 @@ import { SessionManager } from './session/SessionManager.js';
 import { closeBackupClient, prewarmBackupClient } from './session/backup/SessionBackup.js';
 import { WhatsAppManager } from './whatsapp/WhatsAppManager.js';
 import { SecurityManager } from './security/SecurityManager.js';
-import { SendController } from './send/SendController.js';
+import { SendController } from './whatsapp/SendController.js';
+import { MessageScheduler } from './messages/scheduler.js';
 import { createServer } from './api/server.js';
 import { getSSEManager } from './api/sse.js';
 import { Watchdog } from './watchdog/Watchdog.js';
-import { warmupThumbnailWorker, stopThumbnailWorker } from './invoice/thumbnail.js';
+import { warmupThumbnailWorker, stopThumbnailWorker } from './documents/thumbnail.js';
 import type { FastifyInstance } from 'fastify';
 
 export class Application {
@@ -28,6 +29,7 @@ export class Application {
   private sessionManager: SessionManager | null = null;
   private whatsappManager: WhatsAppManager | null = null;
   private sendController: SendController | null = null;
+  private messageScheduler: MessageScheduler | null = null;
   private watchdog: Watchdog | null = null;
   private server: FastifyInstance | null = null;
   private isShuttingDown = false;
@@ -77,6 +79,11 @@ export class Application {
     this.sendController.registerWhatsAppManager(this.whatsappManager);
     this.sendController.registerSecurityManager(securityManager);
 
+    // The durable message scheduler (due-job scan/claim/execute/recover).
+    // Started after the HTTP server is listening; fails closed (inactive)
+    // when the system client is unconfigured.
+    this.messageScheduler = new MessageScheduler(this.sendController);
+
     // The SSE route feeds the client-presence tracker (authenticated
     // streams = present clients → automatic wake + runtime demand).
     this.server = await createServer({
@@ -86,6 +93,7 @@ export class Application {
       sendController: this.sendController,
       stateMachine: this.stateMachine,
       clientPresence: this.whatsappManager.clientPresence,
+      messageScheduler: this.messageScheduler,
     });
 
     await this.server.listen({ port: cfg.port, host: cfg.host });
@@ -99,8 +107,13 @@ export class Application {
     this.watchdog = new Watchdog(securityManager);
     this.watchdog.start();
 
+    // Durable messages: the scheduler scans PostgreSQL for due jobs. Jobs
+    // created before a restart simply wait for their run_at — nothing is
+    // lost, nothing is blindly reset (expired claims recover via lease).
+    this.messageScheduler.start();
+
     // Fire-and-forget warmups (never fatal): the Redis backup client and
-    // the persistent canvas worker, so the first restore-check/invoice send
+    // the persistent canvas worker, so the first restore-check/document send
     // does not pay the cold-start cost.
     void prewarmBackupClient();
     void warmupThumbnailWorker().catch(() => { /* never fatal */ });
@@ -146,6 +159,17 @@ export class Application {
     log.info({ signal }, 'Graceful shutdown starting');
 
     lifecycle.markShuttingDown();
+
+    // Stop scheduling new message work FIRST; an in-flight job finishes
+    // within a bounded wait. Claims are never blindly reset — abandoned
+    // claims recover via lease expiry on the next process start.
+    if (this.messageScheduler) {
+      try {
+        await this.messageScheduler.stop();
+      } catch (err) {
+        log.error({ err: err instanceof Error ? err.message : String(err) }, 'Error stopping message scheduler');
+      }
+    }
 
     if (this.stateMachine) {
       const currentState = this.stateMachine.state;

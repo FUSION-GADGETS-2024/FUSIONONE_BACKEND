@@ -1,11 +1,11 @@
 /**
- * Send Controller — the transport stage of the sendInvoice operation.
+ * Send Controller — the transport stage of every document message send.
  * Serializes send operations (concurrency = 1), enforces the send timeout,
  * retries transient failures with bounded backoff, maps failures into the
- * canonical error registry, and emits SEND_INVOICE_RESULT events. Invoice
- * composition (Supabase load → InvoiceData → template → PDF) happens in
- * invoice/send.ts BEFORE this controller is invoked. The controller never
- * creates, stores, or persists invoices — after a send settles, all
+ * canonical error registry, and emits MESSAGE_SEND_RESULT events. Message
+ * composition (data load → template → document preparation) happens in
+ * messages/send.ts BEFORE this controller is invoked. The controller never
+ * creates, stores, or persists business records — after a send settles, all
  * references are released.
  */
 import { getConfig } from '../config/index.js';
@@ -15,10 +15,10 @@ import { EventType } from '../events/registry.js';
 import { getLifecycle } from '../session/lifecycle.js';
 import { AsyncMutex } from '../utils/mutex.js';
 import { AppError, ErrorCode, type ErrorCodeValue } from '../errors/registry.js';
-import type { WhatsAppManager, DocumentThumbnail } from '../whatsapp/WhatsAppManager.js';
+import type { WhatsAppManager, DocumentThumbnail } from './WhatsAppManager.js';
 import type { SecurityManager } from '../security/SecurityManager.js';
 
-/** The transport-stage send input (produced by the invoice pipeline). */
+/** The transport-stage send input (produced by the message pipeline). */
 export interface SendInput {
   requestId: string;
   /** Recipient JID (already normalized). */
@@ -59,11 +59,10 @@ export class SendController {
     this.securityManager = sm;
   }
 
-  /**
-   * Execute a sendInvoice operation (transport stage): check operational →
+  /** Execute ONE document message send (transport stage): check operational →
    * acquire the send mutex → wake-on-demand (never pairs; joins any
    * in-flight startup) → verify connected → send with retry/timeout →
-   * emit SEND_INVOICE_RESULT.
+   * emit MESSAGE_SEND_RESULT.
    */
   async send(input: SendInput): Promise<SendResult> {
     const log = getLogger();
@@ -71,7 +70,7 @@ export class SendController {
 
     log.info(
       { requestId, recipient: '[present]', fileName, pdfBytes: pdfBuffer.length, hasCaption: !!caption, thumbnailBytes: thumbnail?.jpeg.length ?? 0 },
-      'sendInvoice starting',
+      'Document message send starting',
     );
 
     if (!this.securityManager?.isOperational()) {
@@ -105,7 +104,7 @@ export class SendController {
 
       this.emitResult(requestId, recipient, true);
 
-      log.info({ requestId, messageId: result.messageId }, 'sendInvoice succeeded');
+      log.info({ requestId, messageId: result.messageId }, 'Document message send succeeded');
 
       return {
         success: true,
@@ -124,7 +123,7 @@ export class SendController {
 
       this.emitResult(requestId, recipient, false, appError.code);
 
-      log.warn({ requestId, errorCode: appError.code }, 'sendInvoice failed');
+      log.warn({ requestId, errorCode: appError.code }, 'Document message send failed');
 
       throw appError;
     } finally {
@@ -254,7 +253,7 @@ export class SendController {
     success: boolean,
     errorCode?: ErrorCodeValue,
   ): void {
-    getEventBus().emitEvent(EventType.SEND_INVOICE_RESULT, {
+    getEventBus().emitEvent(EventType.MESSAGE_SEND_RESULT, {
       requestId,
       recipient,
       result: success ? 'success' : 'failed',

@@ -1,81 +1,68 @@
 /**
- * Invoice thumbnail generator (WhatsApp document preview) — Canvas worker.
+ * Document thumbnail generator (WhatsApp chat-bubble preview) — Canvas worker.
  *
  * ARCHITECTURE (the thumbnail is NOT derived from the rendered PDF):
- *   InvoiceData ──┬─→ PDFKit        → PDF buffer      (invoice/pdf.ts)
- *                 └─→ Canvas worker → JPEG thumbnail  (this module)
+ *   DocumentData ──┬─→ PDFKit        → PDF buffer      (documents/{invoice,receipt,statement}.ts)
+ *                  └─→ Canvas worker → JPEG thumbnail  (this module)
  *
- * The thumbnail renders the UPPER SECTION of the same Prestige design straight
- * from the canonical InvoiceData (never raw DB rows, never re-calculated
- * totals, never a re-parsed PDF). The shared constants from prestige.ts are
+ * The worker renders the UPPER SECTION of the SAME Prestige design straight
+ * from the canonical document data (never raw DB rows, never re-calculated
+ * totals, never a re-parsed PDF) — for EVERY document kind: invoice, payment
+ * receipt, payment statement. The shared constants from theme.ts are
  * serialized into the worker environment — one visual source of truth.
  *
  * PERSISTENT WORKER: a single plain-Node child process is spawned once, loads
  * @napi-rs/canvas + fonts ONCE, reports readiness, then serves unlimited
  * thumbnail jobs over stdin/stdout:
- *   parent → worker : one JSON line per job  {"id":N,"data":InvoiceData}
+ *   parent → worker : one JSON line per job  {"id":N,"kind":"invoice|receipt|statement","data":…}
  *   worker → parent : {"t":"ready"}, then per job {"id":N,"ok":true,...,"jpegLen":K}\n
  *                     + K raw JPEG bytes (or {"id":N,"ok":false,"error":"..."})
  *
  * WHY A SEPARATE NODE PROCESS: the backend runs under Bun and the
- * @napi-rs/canvas native binding hard-crashes the Bun runtime (verified in
- * this sandbox) — the worker runs under plain Node, crash-isolated by
- * construction. Crash/failure semantics (the thumbnail is purely cosmetic):
- * worker crash → pending jobs resolve null, worker restarts lazily; job
- * timeout → job resolves null, hung worker killed and replaced; ANY failure →
- * the invoice is sent PDF-only, never blocked. No filesystem I/O — entirely
- * in memory.
+ * @napi-rs/canvas native binding hard-crashes the Bun runtime — the worker
+ * runs under plain Node, crash-isolated by construction. Crash/failure
+ * semantics (the thumbnail is purely cosmetic): worker crash → pending jobs
+ * resolve null, worker restarts lazily; job timeout → job resolves null,
+ * hung worker killed and replaced; ANY failure → the document is sent
+ * PDF-only, never blocked. No filesystem I/O — entirely in memory.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { getLogger } from '../logging/logger.js';
-import type { InvoiceData } from './types.js';
+import type { DocumentKind, InvoiceData, ReceiptData, StatementData } from './types.js';
 import {
   PRESTIGE_COLORS,
   PRESTIGE_LAYOUT,
   PRESTIGE_TABLE_HEADERS,
   PRESTIGE_TRADE_IN_HEADERS,
   PRESTIGE_ICONS,
-} from './prestige.js';
+} from './theme.js';
 
 // ── Public configuration ───────────────────────────────────────────────────
 
 /**
  * Thumbnail width in pixels (A4 width 595.28pt → scale ≈ 0.7458). 444px is
  * the production-safe WhatsApp document-thumbnail envelope established by
- * live testing on the real logged-in account: previews at this width
- * rendered reliably in the recipient's document bubble, while the previous
- * wider output (~587px) fell outside the client's renderable envelope and
- * was silently not displayed. The width is fixed; only the height varies
- * with the invoice content.
+ * live testing on the real logged-in account. The width is fixed; only the
+ * height varies with the document content.
  */
 const THUMBNAIL_WIDTH_PX = 444;
 
 /**
- * Maximum thumbnail height in pixels. 250px keeps the preview inside the
- * same live-verified envelope (rendering was confirmed up to 270px tall;
- * 250px leaves ~20px of production safety margin below the largest
- * confirmed-good case). The crop remains content-driven: only complete
- * item rows are ever shown, a short invoice renders SHORTER than this cap,
- * and the height is never padded up to it.
+ * Maximum thumbnail height in pixels (the same live-verified envelope;
+ * 250px leaves ~20px of production safety margin). The crop remains
+ * content-driven: only complete rows are ever shown, a short document
+ * renders SHORTER than this cap, and the height is never padded up to it.
  */
 const THUMBNAIL_MAX_HEIGHT_PX = 250;
 
 /**
- * JPEG quality ladder — quality first, byte size second.
- *
- * The pixel dimensions above are the safety constraint, so image quality
- * is not sacrificed preemptively: the primary encode runs at quality 100,
- * and the lower rungs exist ONLY as a byte-budget safeguard (a re-encode
- * when the output exceeds the soft limit below). The ladder never reduces
- * the resolution.
- *
- * @napi-rs/canvas 0.1.68 takes quality on a 0-100 scale in
- * toBuffer('image/jpeg', quality). Values below 1 (e.g. a legacy 0.85)
- * encode at near-zero quality: the output loses chroma on thin colored
- * features and looks washed out (the Prestige gold bar decodes gray).
- * All ladder values below are therefore proper 0-100 numbers.
+ * JPEG quality ladder — quality first, byte size second. The primary encode
+ * runs at quality 100; lower rungs exist ONLY as a byte-budget safeguard
+ * (a re-encode when the output exceeds the soft limit below). The ladder
+ * never reduces the resolution. (@napi-rs/canvas takes quality on a 0-100
+ * scale; values below 1 encode at near-zero quality.)
  */
 const THUMBNAIL_JPEG_QUALITY = 100;
 const THUMBNAIL_JPEG_QUALITY_FALLBACK = 90;
@@ -83,9 +70,8 @@ const THUMBNAIL_JPEG_QUALITY_LAST_RESORT = 80;
 
 /**
  * Soft ceiling for the inline jpegThumbnail payload. WhatsApp carries the
- * thumbnail inside the message itself (not as uploaded media), so a sane
- * bound is enforced by re-encoding at a lower quality — never by shrinking
- * the resolution.
+ * thumbnail inside the message itself, so a sane bound is enforced by
+ * re-encoding at a lower quality — never by shrinking the resolution.
  */
 const THUMBNAIL_JPEG_SOFT_LIMIT_BYTES = 65_536;
 
@@ -101,26 +87,18 @@ const THUMBNAIL_SPAWN_COOLDOWN_MS = 1_000;
 // ── Result contract ────────────────────────────────────────────────────────
 
 /** Outcome of a thumbnail generation request. `jpeg` is null on ANY failure. */
-export interface InvoiceThumbnail {
+export interface DocumentThumbnailResult {
   jpeg: Buffer | null;
   width: number | null;
   height: number | null;
-  /** Number of complete item rows visible in the crop (never a partial row). */
-  rows: number | null;
-  /** Number of complete trade-in rows visible in the crop. */
-  tradeInRows: number | null;
-  /** Bottom of the rendered content in PDF points (the safe crop boundary). */
-  bottomPt: number | null;
-  /** Full pipeline timing (ms): total = request→JPEG in hand. */
-  ms: { total: number; draw: number | null; encode: number | null };
+  /** Generation timing (ms): total = request→JPEG in hand. */
+  ms: number;
 }
 
 type WorkerOkReply = {
   ok: true;
   w: number;
   h: number;
-  rows: number;
-  tradeInRows: number;
   bottomPt: number;
   jpeg: Buffer;
   ms: { draw: number; encode: number };
@@ -133,8 +111,6 @@ interface WorkerHeader {
   ok?: boolean;
   w?: number;
   h?: number;
-  rows?: number;
-  tradeInRows?: number;
   bottomPt?: number;
   jpegLen?: number;
   ms?: { draw: number; encode: number };
@@ -169,7 +145,7 @@ let workerEnvWarned = false;
  * Resolve everything the worker needs: the @napi-rs/canvas module path (the
  * eval'd child has no module context of its own) and a Helvetica-metric font
  * pair. The Prestige visual spec (colors/layout/labels/icons) is serialized
- * from prestige.ts so the worker cannot drift from the PDF design.
+ * from theme.ts so the worker cannot drift from the PDF design.
  */
 function resolveWorkerEnv(): WorkerEnv | null {
   if (workerEnvCache !== undefined) return workerEnvCache;
@@ -192,7 +168,7 @@ function resolveWorkerEnv(): WorkerEnv | null {
       workerEnvWarned = true;
       getLogger().warn(
         { err: err instanceof Error ? err.message : String(err) },
-        'Thumbnail worker environment unavailable — invoices will send without chat previews',
+        'Thumbnail worker environment unavailable — documents will send without chat previews',
       );
     }
   }
@@ -203,7 +179,9 @@ function resolveWorkerEnv(): WorkerEnv | null {
 //
 // Protocol (see module docstring). The source receives its configuration via
 // environment variables resolved by the parent; it performs NO filesystem
-// writes and keeps everything in memory.
+// writes and keeps everything in memory. Every document kind renders the
+// SAME shared header/party blocks; each kind then draws its own upper
+// section, mirroring its PDF builder.
 //
 // NOTE: this string uses String.raw — every backslash below must remain a
 // literal backslash in the emitted source. No template literals are used
@@ -212,9 +190,9 @@ function resolveWorkerEnv(): WorkerEnv | null {
 const WORKER_SOURCE = String.raw`
 'use strict';
 // ── Persistent thumbnail worker: Prestige upper-section renderer ──────────
-// Draws the invoice preview directly from InvoiceData with the SAME layout
-// constants as the PDFKit document (injected via THUMB_SPEC). The crop ends
-// at a SAFE boundary: only complete rows are ever visible.
+// Draws the document preview directly from the canonical document data with
+// the SAME layout constants as the PDFKit document (injected via THUMB_SPEC).
+// The crop ends at a SAFE boundary: only complete rows are ever visible.
 
 const CANVAS_PATH = process.env.THUMB_CANVAS;
 const SPEC = JSON.parse(process.env.THUMB_SPEC);
@@ -257,61 +235,17 @@ if (!okReg || !okBold) {
   process.exit(3);
 }
 
-// ── Item text semantics (identical to prestige.ts — keep in sync) ─────────
+// ── Text helpers (all coordinates in PDF points) ──────────────────────────
 
 function fmt(n) {
   return (Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' Rs.';
 }
-function descText(item) {
-  return item.description || ((item.brand || '') + ' ' + (item.model || '')).trim();
+function fmtDate(value) {
+  if (!value) return '';
+  const d = new Date(String(value) + 'T00:00:00');
+  if (isNaN(d.getTime())) return String(value);
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }
-function subLineText(item, isTradeIn) {
-  if (isTradeIn) return item.imei ? 'IMEI: ' + item.imei : '';
-  const parts = [item.ram_rom, item.color, item.imei ? 'IMEI: ' + item.imei : ''].filter(Boolean);
-  return parts.join(' \u2022 ');
-}
-function amountText(item, isTradeIn) {
-  if (isTradeIn) {
-    const qty = item.qty || 1;
-    const rate = item.rate || item.credit_value || 0;
-    return fmt(qty * rate);
-  }
-  return fmt(item.value || item.price || 0);
-}
-function billingLabel(type) {
-  return type === 'purchase' ? 'RECEIVED FROM' : 'BILL TO';
-}
-function invoiceTitle(type) {
-  return type === 'proforma' ? 'QUOTATION' : type === 'sale' ? 'TAX INVOICE' : 'PURCHASE BILL';
-}
-
-// ── Logo cache (the store logo rarely changes — fetch once per TTL) ───────
-
-const logoCache = new Map(); // url → { image, at }
-const LOGO_TTL_MS = 10 * 60 * 1000;
-const LOGO_MAX_ENTRIES = 8;
-
-async function fetchLogoImage(url) {
-  if (!url || !/^https?:\/\//i.test(url)) return null;
-  const hit = logoCache.get(url);
-  if (hit && Date.now() - hit.at < LOGO_TTL_MS) return hit.image;
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) return null;
-    const bytes = Buffer.from(await res.arrayBuffer());
-    if (!bytes || bytes.length === 0) return null;
-    const image = await loadImage(bytes).catch(() => null); // validates decodability
-    if (!image) return null;
-    if (logoCache.size >= LOGO_MAX_ENTRIES) logoCache.delete(logoCache.keys().next().value);
-    logoCache.set(url, { image: image, at: Date.now() });
-    return image;
-  } catch {
-    return null;
-  }
-}
-
-// ── Text helpers (all coordinates in PDF points) ──────────────────────────
-
 function setFont(ctx, bold, size) {
   ctx.font = size + 'px ' + (bold ? F_BOLD : F_REG);
 }
@@ -380,8 +314,186 @@ function drawIcon(ctx, pathData, x, y) {
   ctx.restore();
 }
 
-// ── Row measurement (must mirror the PDF row height formula) ──────────────
+// ── Item text semantics (identical to theme.ts — keep in sync) ────────────
 
+function descText(item) {
+  return item.description || ((item.brand || '') + ' ' + (item.model || '')).trim();
+}
+function subLineText(item, isTradeIn) {
+  if (isTradeIn) return item.imei ? 'IMEI: ' + item.imei : '';
+  const parts = [item.ram_rom, item.color, item.imei ? 'IMEI: ' + item.imei : ''].filter(Boolean);
+  return parts.join(' \u2022 ');
+}
+function amountText(item, isTradeIn) {
+  if (isTradeIn) {
+    const qty = item.qty || 1;
+    const rate = item.rate || item.credit_value || 0;
+    return fmt(qty * rate);
+  }
+  return fmt(item.value || item.price || 0);
+}
+function billingLabel(type) {
+  return type === 'purchase' ? 'RECEIVED FROM' : 'BILL TO';
+}
+function invoiceTitle(type) {
+  return type === 'proforma' ? 'QUOTATION' : type === 'sale' ? 'TAX INVOICE' : 'PURCHASE BILL';
+}
+
+// ── Logo cache (the store logo rarely changes — fetch once per TTL) ───────
+
+const logoCache = new Map(); // url → { image, at }
+const LOGO_TTL_MS = 10 * 60 * 1000;
+const LOGO_MAX_ENTRIES = 8;
+
+async function fetchLogoImage(url) {
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+  const hit = logoCache.get(url);
+  if (hit && Date.now() - hit.at < LOGO_TTL_MS) return hit.image;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return null;
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (!bytes || bytes.length === 0) return null;
+    const image = await loadImage(bytes).catch(() => null); // validates decodability
+    if (!image) return null;
+    if (logoCache.size >= LOGO_MAX_ENTRIES) logoCache.delete(logoCache.keys().next().value);
+    logoCache.set(url, { image: image, at: Date.now() });
+    return image;
+  } catch {
+    return null;
+  }
+}
+
+// ── Shared blocks (every document kind draws these identically) ───────────
+
+/** Gold bar + logo box + store name/GSTIN + right contact column + border. */
+async function drawHeaderBlock(ctx, store, storeName) {
+  ctx.fillStyle = C.white;
+  ctx.fillRect(0, 0, L.pageW, L.pageH);
+
+  ctx.fillStyle = C.gold;
+  ctx.fillRect(0, 0, L.pageW, L.goldBarH);
+
+  ctx.strokeStyle = C.black;
+  ctx.lineWidth = 1.1;
+  ctx.strokeRect(L.marginX, L.headerStartY, 36, 36);
+
+  const logo = await fetchLogoImage(store.logo_url);
+  if (logo) {
+    // contain-fit, centered in the 36×36 box (PDFKit fit semantics).
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    const s = Math.min(36 / logo.width, 36 / logo.height);
+    const dw = logo.width * s;
+    const dh = logo.height * s;
+    ctx.drawImage(logo, L.marginX + (36 - dw) / 2, L.headerStartY + (36 - dh) / 2, dw, dh);
+  } else {
+    const initials = storeName.substring(0, 2).toUpperCase();
+    const initH = 15 * LINE_H_BOLD; // PDFKit heightOfString(initials)
+    textLine(ctx, initials, L.marginX + 18, L.headerStartY + (36 - initH) / 2, {
+      bold: true, size: 15, color: C.black, align: 'center',
+    });
+  }
+
+  textLine(ctx, storeName, L.marginX + 46, L.headerStartY + 8, {
+    bold: true, size: 14, color: C.black,
+  });
+  if (store.gstin) {
+    textLine(ctx, 'GSTIN: ' + store.gstin, L.marginX + 46, L.headerStartY + 26, {
+      bold: false, size: 6.75, color: C.textSecondary,
+    });
+  }
+
+  // Right-aligned contact lines with gold icons (icons hug their text)
+  const rightX = L.contentRight;
+  let contactY = L.headerStartY + 2.5;
+  const contactLine = (text, iconPath, wrapWidth) => {
+    const lines = wrapLines(MEASURE_CTX, text, false, 6.75, wrapWidth);
+    const textW = Math.min(measure(MEASURE_CTX, text, false, 6.75), wrapWidth);
+    drawIcon(ctx, iconPath, rightX - textW - 14, contactY - 1);
+    const lh = lineHeight(6.75, false);
+    lines.forEach((line, i) => {
+      textLine(ctx, line, rightX, contactY + i * lh, {
+        bold: false, size: 6.75, color: C.textSecondary, align: 'right',
+      });
+    });
+    contactY += lines.length * lh + 6.6;
+  };
+  if (store.phone) contactLine(store.phone, ICONS.phone, 110);
+  if (store.email) contactLine(store.email, ICONS.email, 110);
+  if (store.address) {
+    contactLine(String(store.address).split('\n').join(', '), ICONS.mapPin, 240);
+  }
+
+  strokeLine(ctx, 0, L.headerBorderY, L.pageW, L.headerBorderY, C.black, 1.5);
+}
+
+/** Party block (left) + document meta column (right) + billing border. */
+function drawPartyMetaBlock(ctx, opts) {
+  const labelY = L.billingLabelY;
+  textLine(ctx, opts.label, L.marginX, labelY, {
+    bold: true, size: 8.25, color: C.gold,
+  });
+  textLine(ctx, opts.partyName, L.marginX, labelY + 17, {
+    bold: true, size: 12, color: C.textPrimary,
+  });
+
+  let cursorY = labelY + 37;
+  if (opts.party.address) {
+    const blockH = textBlock(ctx, String(opts.party.address).split('\n').join(', '), L.marginX, cursorY, {
+      bold: false, size: 7.1, color: C.textSecondary, maxWidth: 254,
+    });
+    cursorY += Math.max(17.5, blockH);
+  }
+  if (opts.party.number) {
+    textLine(ctx, 'Contact No.', L.marginX, cursorY, {
+      bold: true, size: 7.1, color: C.textPrimary,
+    });
+    textLine(ctx, opts.party.number, L.marginX + 54, cursorY, {
+      bold: false, size: 7.1, color: C.textSecondary,
+    });
+  }
+
+  strokeLine(ctx, L.pageW / 2, labelY, L.pageW / 2, L.billingBorderY - 24, C.border, 0.75);
+
+  const metaX = L.pageW / 2 + 12;
+  textLine(ctx, opts.title, metaX, labelY - 5, {
+    bold: true, size: opts.titleSize, color: C.black,
+  });
+  opts.metaRows.forEach((row, i) => {
+    const y = labelY + 22 + i * 10;
+    textLine(ctx, row.label, metaX, y, { bold: true, size: 6.75, color: C.textPrimary });
+    textLine(ctx, row.value, metaX + 67.5, y, { bold: false, size: 7.1, color: C.textSecondary });
+  });
+
+  strokeLine(ctx, 0, L.billingBorderY, L.pageW, L.billingBorderY, C.border, 0.75);
+}
+
+/** The emphasized black bar with the gold value (Prestige total treatment). */
+function drawAmountBar(ctx, opts) {
+  const barMidY = opts.top + L.gtBlockH / 2;
+  ctx.fillStyle = C.black;
+  ctx.fillRect(opts.x, opts.top, opts.w, L.gtBlockH);
+  textLine(ctx, opts.label, opts.x + 12, barMidY - 0.718 * 8.25, {
+    bold: true, size: 8.25, color: C.white,
+  });
+  textLine(ctx, opts.value, opts.x + opts.w - opts.valueInset, barMidY - 0.718 * 11.25, {
+    bold: true, size: 11.25, color: C.gold, align: 'right',
+  });
+}
+
+// ── Canvas creation for a planned crop ─────────────────────────────────────
+
+function makeCanvas(safeBottomPt) {
+  const clamped = Math.min(safeBottomPt, CROP_BUDGET_PT);
+  const widthPx = OUT_WIDTH;
+  const heightPx = Math.min(Math.ceil(clamped * SCALE), OUT_MAX_HEIGHT);
+  return { canvas: createCanvas(widthPx, heightPx), heightPx: heightPx };
+}
+
+// ── Invoice renderer ───────────────────────────────────────────────────────
+
+// Row measurement (must mirror the PDF row height formula).
 const MEASURE_CTX = createCanvas(8, 8).getContext('2d');
 
 function rowLayout(ctx, item, isTradeIn) {
@@ -398,9 +510,7 @@ function rowLayout(ctx, item, isTradeIn) {
   return { desc, sub, descLines, subLines, descH, subH, height };
 }
 
-// ── The renderer ───────────────────────────────────────────────────────────
-
-async function renderThumbnail(data) {
+async function renderInvoiceThumbnail(data) {
   const tDrawStart = performance.now();
 
   const store = data.store || {};
@@ -447,134 +557,24 @@ async function renderThumbnail(data) {
   } else {
     safeBottomPt = L.tableHeaderY + L.tableHeaderH + 20; // header-only preview
   }
-  safeBottomPt = Math.min(safeBottomPt, CROP_BUDGET_PT);
 
-  const widthPx = OUT_WIDTH;
-  const heightPx = Math.min(Math.ceil(safeBottomPt * SCALE), OUT_MAX_HEIGHT);
-
-  // ── Draw (all coordinates in PDF points; ctx scaled pt → px) ──────────
-  const canvas = createCanvas(widthPx, heightPx);
+  const { canvas, heightPx } = makeCanvas(safeBottomPt);
   const ctx = canvas.getContext('2d');
   ctx.scale(SCALE, SCALE);
 
-  // Page background
-  ctx.fillStyle = C.white;
-  ctx.fillRect(0, 0, L.pageW, heightPx / SCALE);
+  await drawHeaderBlock(ctx, store, storeName);
 
-  // Gold top accent bar
-  ctx.fillStyle = C.gold;
-  ctx.fillRect(0, 0, L.pageW, L.goldBarH);
-
-  // ── Header: logo box + store name + contact column ────────────────────
-  ctx.strokeStyle = C.black;
-  ctx.lineWidth = 1.1;
-  ctx.strokeRect(L.marginX, L.headerStartY, 36, 36);
-
-  const logo = await fetchLogoImage(store.logo_url);
-  if (logo) {
-    // contain-fit, centered in the 36×36 box (PDFKit fit semantics).
-    // High-quality smoothing: the logo raster is downscaled to the
-    // thumbnail resolution and the default 'low' filter softens it.
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    const s = Math.min(36 / logo.width, 36 / logo.height);
-    const dw = logo.width * s;
-    const dh = logo.height * s;
-    ctx.drawImage(
-      logo,
-      L.marginX + (36 - dw) / 2,
-      L.headerStartY + (36 - dh) / 2,
-      dw,
-      dh,
-    );
-  } else {
-    const initials = storeName.substring(0, 2).toUpperCase();
-    const initH = 15 * LINE_H_BOLD; // PDFKit heightOfString(initials)
-    textLine(ctx, initials, L.marginX + 18, L.headerStartY + (36 - initH) / 2, {
-      bold: true, size: 15, color: C.black, align: 'center',
-    });
-  }
-
-  textLine(ctx, storeName, L.marginX + 46, L.headerStartY + 8, {
-    bold: true, size: 14, color: C.black,
+  drawPartyMetaBlock(ctx, {
+    party: party,
+    partyName: partyName,
+    label: billingLabel(data.type),
+    title: invoiceTitle(data.type),
+    titleSize: 21,
+    metaRows: [
+      { label: 'INVOICE NO.', value: data.bill_number },
+      { label: 'DATE', value: data.date },
+    ],
   });
-  if (store.gstin) {
-    textLine(ctx, 'GSTIN: ' + store.gstin, L.marginX + 46, L.headerStartY + 26, {
-      bold: false, size: 6.75, color: C.textSecondary,
-    });
-  }
-
-  // Right-aligned contact lines with gold icons (icons hug their text)
-  const rightX = L.contentRight;
-  let contactY = L.headerStartY + 2.5;
-  const contactLine = (text, iconPath, wrapWidth) => {
-    const lines = wrapLines(MEASURE_CTX, text, false, 6.75, wrapWidth);
-    const textW = Math.min(measure(MEASURE_CTX, text, false, 6.75), wrapWidth);
-    drawIcon(ctx, iconPath, rightX - textW - 14, contactY - 1);
-    const lh = lineHeight(6.75, false);
-    lines.forEach((line, i) => {
-      textLine(ctx, line, rightX, contactY + i * lh, {
-        bold: false, size: 6.75, color: C.textSecondary, align: 'right',
-      });
-    });
-    contactY += lines.length * lh + 6.6;
-  };
-  if (store.phone) contactLine(store.phone, ICONS.phone, 110);
-  if (store.email) contactLine(store.email, ICONS.email, 110);
-  if (store.address) {
-    contactLine(String(store.address).split('\n').join(', '), ICONS.mapPin, 240);
-  }
-
-  // Header bottom border (full page width)
-  strokeLine(ctx, 0, L.headerBorderY, L.pageW, L.headerBorderY, C.black, 1.5);
-
-  // ── Billing (left) + invoice meta (right) ──────────────────────────────
-  const labelY = L.billingLabelY;
-  textLine(ctx, billingLabel(data.type), L.marginX, labelY, {
-    bold: true, size: 8.25, color: C.gold,
-  });
-  textLine(ctx, partyName, L.marginX, labelY + 17, {
-    bold: true, size: 12, color: C.textPrimary,
-  });
-
-  let cursorY = labelY + 37;
-  if (party.address) {
-    const blockH = textBlock(ctx, String(party.address).split('\n').join(', '), L.marginX, cursorY, {
-      bold: false, size: 7.1, color: C.textSecondary, maxWidth: 254,
-    });
-    cursorY += Math.max(17.5, blockH);
-  }
-  if (party.number) {
-    textLine(ctx, 'Contact No.', L.marginX, cursorY, {
-      bold: true, size: 7.1, color: C.textPrimary,
-    });
-    textLine(ctx, party.number, L.marginX + 54, cursorY, {
-      bold: false, size: 7.1, color: C.textSecondary,
-    });
-  }
-
-  // Vertical divider between billing and meta columns
-  strokeLine(ctx, L.pageW / 2, labelY, L.pageW / 2, L.billingBorderY - 24, C.border, 0.75);
-
-  const metaX = L.pageW / 2 + 12;
-  textLine(ctx, invoiceTitle(data.type), metaX, labelY - 5, {
-    bold: true, size: 21, color: C.black,
-  });
-  textLine(ctx, 'INVOICE NO.', metaX, labelY + 22, {
-    bold: true, size: 6.75, color: C.textPrimary,
-  });
-  textLine(ctx, data.bill_number, metaX + 67.5, labelY + 22, {
-    bold: false, size: 7.1, color: C.textSecondary,
-  });
-  textLine(ctx, 'DATE', metaX, labelY + 32, {
-    bold: true, size: 6.75, color: C.textPrimary,
-  });
-  textLine(ctx, data.date, metaX + 67.5, labelY + 32, {
-    bold: false, size: 7.1, color: C.textSecondary,
-  });
-
-  // Billing bottom border (full page width)
-  strokeLine(ctx, 0, L.billingBorderY, L.pageW, L.billingBorderY, C.border, 0.75);
 
   // ── Items section ───────────────────────────────────────────────────────
   textLine(ctx, 'ITEMS PURCHASED', L.marginX, L.itemsLabelY, {
@@ -684,20 +684,199 @@ async function renderThumbnail(data) {
     });
   }
 
-  // ── Encode: quality ladder, resolution is NEVER reduced ────────────────
-  const tEncodeStart = performance.now();
-  // @napi-rs/canvas 0.1.68 encoder contract (verified empirically):
+  return finishThumbnail(canvas, heightPx, safeBottomPt, tDrawStart);
+}
+
+// ── Payment-receipt renderer ───────────────────────────────────────────────
+
+async function renderReceiptThumbnail(data) {
+  const tDrawStart = performance.now();
+
+  const store = data.store || {};
+  const storeName = store.name || 'FUSION GADGETS';
+  const party = data.party || {};
+  const partyName = party.name || 'Customer';
+  const isIn = data.direction === 'in';
+
+  // Plan the crop: complete payment-detail rows only, then the amount bar
+  // when it fully fits (mirrors the receipt PDF's composition order).
+  const rows = [];
+  if (data.amount != null) rows.push(['Payment Amount', fmt(data.amount), true]);
+  rows.push(['Payment Mode', data.payment_mode || 'Cash', false]);
+  if (data.bank_account) rows.push(['Account', data.bank_account, false]);
+  if (data.invoice_total != null) rows.push(['Invoice Total', fmt(data.invoice_total), false]);
+  if (data.invoice_paid != null) {
+    rows.push([isIn ? 'Total Received on Invoice' : 'Total Paid on Invoice', fmt(data.invoice_paid), false]);
+  }
+  if (data.invoice_due != null) rows.push(['Balance Due', fmt(data.invoice_due), false]);
+
+  let y = L.billingBorderY + 24 + 20; // below the 'PAYMENT DETAILS' label
+  const planned = [];
+  for (const row of rows) {
+    if (y + 17 > CROP_BUDGET_PT - PAD_BOTTOM) break;
+    planned.push({ row, top: y });
+    y += 17;
+  }
+  const barTop = y + 6;
+  const barFits = barTop + L.gtBlockH <= CROP_BUDGET_PT - PAD_BOTTOM;
+
+  let safeBottomPt;
+  if (barFits) {
+    safeBottomPt = barTop + L.gtBlockH + PAD_BOTTOM;
+  } else if (planned.length > 0) {
+    safeBottomPt = y + PAD_BOTTOM;
+  } else {
+    safeBottomPt = L.billingBorderY + 40; // header + party block only
+  }
+
+  const { canvas, heightPx } = makeCanvas(safeBottomPt);
+  const ctx = canvas.getContext('2d');
+  ctx.scale(SCALE, SCALE);
+
+  await drawHeaderBlock(ctx, store, storeName);
+
+  drawPartyMetaBlock(ctx, {
+    party: party,
+    partyName: partyName,
+    label: isIn ? 'RECEIVED FROM' : 'PAID TO',
+    title: 'PAYMENT RECEIPT',
+    titleSize: 21,
+    metaRows: [
+      { label: 'RECEIPT NO.', value: data.receipt_number },
+      { label: 'DATE', value: data.date },
+      ...(data.invoice_number ? [{ label: 'INVOICE NO.', value: data.invoice_number }] : []),
+    ],
+  });
+
+  // Payment details label + the planned complete rows.
+  textLine(ctx, 'PAYMENT DETAILS', L.marginX, L.billingBorderY + 24, {
+    bold: true, size: 8.25, color: C.textSecondary,
+  });
+  planned.forEach(({ row, top }) => {
+    const [label, value, bold] = row;
+    textLine(ctx, label, L.marginX, top, {
+      bold: bold, size: 8.25, color: bold ? C.textPrimary : C.textSecondary,
+    });
+    textLine(ctx, value, L.contentRight, top, {
+      bold: bold, size: 8.25, color: C.textPrimary, align: 'right',
+    });
+  });
+
+  if (barFits) {
+    drawAmountBar(ctx, {
+      x: L.marginX,
+      w: L.pageW - L.marginX * 2,
+      top: barTop,
+      label: isIn ? 'AMOUNT RECEIVED' : 'AMOUNT PAID',
+      value: fmt(data.amount),
+      valueInset: 24,
+    });
+  }
+
+  return finishThumbnail(canvas, heightPx, safeBottomPt, tDrawStart);
+}
+
+// ── Payment-statement renderer ─────────────────────────────────────────────
+
+async function renderStatementThumbnail(data) {
+  const tDrawStart = performance.now();
+
+  const store = data.store || {};
+  const storeName = store.name || 'FUSION GADGETS';
+  const party = data.party || {};
+  const partyName = party.name || 'Customer';
+  const isIn = data.direction === 'in';
+  const payments = Array.isArray(data.payments) ? data.payments : [];
+
+  // Plan the crop: complete history rows only (mirrors the statement PDF's
+  // payment-history table).
+  const historyLabelY = L.billingBorderY + 24;
+  const tableHeaderTop = historyLabelY + 20;
+  const rowsTop = tableHeaderTop + 18;
+  const rowH = 17;
+  let y = rowsTop;
+  const planned = [];
+  for (const p of payments) {
+    if (y + rowH > CROP_BUDGET_PT - PAD_BOTTOM) break;
+    planned.push({ p, top: y });
+    y += rowH;
+  }
+
+  let safeBottomPt;
+  if (planned.length > 0) {
+    safeBottomPt = y + PAD_BOTTOM;
+  } else {
+    safeBottomPt = rowsTop + 20; // header + party + table header
+  }
+
+  const { canvas, heightPx } = makeCanvas(safeBottomPt);
+  const ctx = canvas.getContext('2d');
+  ctx.scale(SCALE, SCALE);
+
+  await drawHeaderBlock(ctx, store, storeName);
+
+  drawPartyMetaBlock(ctx, {
+    party: party,
+    partyName: partyName,
+    label: isIn ? 'RECEIVED FROM' : 'PAID TO',
+    title: 'PAYMENT STATEMENT',
+    titleSize: 19,
+    metaRows: [
+      { label: 'STATEMENT NO.', value: data.statement_number },
+      { label: 'DATE', value: fmtDate(data.date) },
+      ...(data.invoice_number
+        ? [{ label: isIn ? 'INVOICE NO.' : 'BILL NO.', value: data.invoice_number }]
+        : []),
+    ],
+  });
+
+  // History label + black table header (DATE / PAYMENT MODE / AMOUNT).
+  textLine(ctx, 'PAYMENT HISTORY', L.marginX, historyLabelY, {
+    bold: true, size: 8.25, color: C.textSecondary,
+  });
+  ctx.fillStyle = C.black;
+  ctx.fillRect(L.marginX, tableHeaderTop, L.contentRight - L.marginX, 18);
+  textLine(ctx, 'DATE', L.marginX + 12, tableHeaderTop + 5.75, {
+    bold: true, size: 6.75, color: C.white,
+  });
+  textLine(ctx, 'PAYMENT MODE', L.marginX + 220, tableHeaderTop + 5.75, {
+    bold: true, size: 6.75, color: C.white,
+  });
+  textLine(ctx, 'AMOUNT', L.contentRight - 12, tableHeaderTop + 5.75, {
+    bold: true, size: 6.75, color: C.white, align: 'right',
+  });
+
+  // Striped history rows (alternating #FAFAFA, separators like the PDF).
+  planned.forEach(({ p, top }, i) => {
+    if (i % 2 === 1) {
+      ctx.fillStyle = '#FAFAFA';
+      ctx.fillRect(L.marginX, top, L.contentRight - L.marginX, rowH);
+    }
+    textLine(ctx, fmtDate(p.date), L.marginX + 12, top + 4.75, {
+      bold: false, size: 7.6, color: C.textSecondary,
+    });
+    textLine(ctx, p.payment_mode || 'Cash', L.marginX + 220, top + 4.75, {
+      bold: false, size: 7.6, color: C.textSecondary,
+    });
+    textLine(ctx, fmt(p.amount), L.contentRight - 12, top + 4.75, {
+      bold: true, size: 7.6, color: C.textPrimary, align: 'right',
+    });
+    strokeLine(ctx, L.marginX, top + rowH, L.contentRight, top + rowH, C.border, 0.5);
+  });
+
+  return finishThumbnail(canvas, heightPx, safeBottomPt, tDrawStart);
+}
+
+// ── Encode: quality ladder, resolution is NEVER reduced ────────────────────
+
+function finishThumbnail(canvas, heightPx, safeBottomPt, tDrawStart) {
+  // @napi-rs/canvas encoder contract (verified empirically):
   //   toBuffer('image/jpeg', q) — q is honored on a 0-100 scale. A value
-  //                              below 1 (e.g. a legacy 0.85) encodes at
-  //                              near-zero quality: heavy artifacts and
-  //                              desaturated thin colored features (the
-  //                              Prestige gold bar turns gray — the
-  //                              "washed-out preview" failure mode).
-  //   toBuffer('image/jpeg', {}) — an options object is NOT part of the
-  //                              0.1.68 API; it is silently ignored and
-  //                              the undocumented default (92) is used.
-  // The canvas was initialized with an opaque solid-white background, so
-  // the encode is a plain RGB JPEG — no alpha, no premultiply artifacts.
+  //   below 1 (e.g. a legacy 0.85) encodes at near-zero quality: heavy
+  //   artifacts and desaturated thin colored features (the Prestige gold
+  //   bar turns gray). An options OBJECT is silently ignored (undocumented
+  //   default 92). The canvas was initialized with an opaque solid-white
+  //   background, so the encode is a plain RGB JPEG.
   let jpeg = canvas.toBuffer('image/jpeg', JPEG_QUALITY);
   if (jpeg.length > JPEG_SOFT_LIMIT) {
     jpeg = canvas.toBuffer('image/jpeg', JPEG_QUALITY_FALLBACK);
@@ -705,17 +884,13 @@ async function renderThumbnail(data) {
   if (jpeg.length > JPEG_SOFT_LIMIT) {
     jpeg = canvas.toBuffer('image/jpeg', JPEG_QUALITY_LAST);
   }
-  const encodeMs = performance.now() - tEncodeStart;
-  const drawMs = tEncodeStart - tDrawStart;
-
+  const encodeMs = performance.now() - tDrawStart;
   return {
-    width: widthPx,
+    width: OUT_WIDTH,
     height: heightPx,
-    rows: itemPlans.length,
-    tradeInRows: tradeInPlans.length,
     safeBottomPt: safeBottomPt,
     jpeg: jpeg,
-    drawMs: drawMs,
+    drawMs: 0,
     encodeMs: encodeMs,
   };
 }
@@ -737,14 +912,16 @@ async function handleJobLine(line) {
   }
   if (!msg || typeof msg.id !== 'number' || !msg.data) return;
   try {
-    const out = await renderThumbnail(msg.data);
+    const render =
+      msg.kind === 'receipt' ? renderReceiptThumbnail(msg.data)
+      : msg.kind === 'statement' ? renderStatementThumbnail(msg.data)
+      : renderInvoiceThumbnail(msg.data);
+    const out = await render;
     sendLine({
       id: msg.id,
       ok: true,
       w: out.width,
       h: out.height,
-      rows: out.rows,
-      tradeInRows: out.tradeInRows,
       bottomPt: Math.round(out.safeBottomPt * 100) / 100,
       jpegLen: out.jpeg.length,
       ms: {
@@ -856,7 +1033,7 @@ function ensureWorker(): Promise<WorkerHandle | null> {
         THUMB_JPEG_QUALITY: String(THUMBNAIL_JPEG_QUALITY),
         THUMB_JPEG_QUALITY_FALLBACK: String(THUMBNAIL_JPEG_QUALITY_FALLBACK),
         THUMB_JPEG_QUALITY_LAST: String(THUMBNAIL_JPEG_QUALITY_LAST_RESORT),
-        THUMB_JPEG_SOFT_LIMIT: String(THUMBNAIL_JPEG_SOFT_LIMIT_BYTES),
+        THUMB_SOFT_LIMIT: String(THUMBNAIL_JPEG_SOFT_LIMIT_BYTES),
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -912,8 +1089,6 @@ function ensureWorker(): Promise<WorkerHandle | null> {
             ok: true,
             w: header.w ?? 0,
             h: header.h ?? 0,
-            rows: header.rows ?? 0,
-            tradeInRows: header.tradeInRows ?? 0,
             bottomPt: header.bottomPt ?? 0,
             jpeg: payload ?? Buffer.alloc(0),
             ms: header.ms ?? { draw: 0, encode: 0 },
@@ -990,7 +1165,7 @@ function ensureWorker(): Promise<WorkerHandle | null> {
         if (!stopping) {
           log.warn(
             { code, signal, pid: child.pid, stderr: stderrTail.slice(0, 300) || undefined },
-            'Thumbnail worker exited — it will restart on the next invoice send',
+            'Thumbnail worker exited — it will restart on the next document send',
           );
         }
         settle(null);
@@ -1015,7 +1190,10 @@ function failAllPending(reason: string): void {
 }
 
 /** One thumbnail request over the persistent worker. Never rejects. */
-async function requestThumbnail(data: InvoiceData): Promise<WorkerReply> {
+async function requestThumbnail(
+  kind: DocumentKind,
+  data: InvoiceData | ReceiptData | StatementData,
+): Promise<WorkerReply> {
   const w = await ensureWorker();
   if (!w) return { ok: false, error: 'thumbnail worker unavailable' };
 
@@ -1031,7 +1209,7 @@ async function requestThumbnail(data: InvoiceData): Promise<WorkerReply> {
 
     pending.set(id, { resolve, timer });
     try {
-      w.child.stdin!.write(JSON.stringify({ id, data }) + '\n');
+      w.child.stdin!.write(JSON.stringify({ id, kind, data }) + '\n');
     } catch (err) {
       pending.delete(id);
       clearTimeout(timer);
@@ -1043,22 +1221,26 @@ async function requestThumbnail(data: InvoiceData): Promise<WorkerReply> {
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /**
- * Generate the WhatsApp chat-bubble preview for an invoice: a crisp JPEG of
- * the UPPER SECTION of the Prestige design (store header, billing/meta,
- * items table with the first complete rows) rendered directly from the
- * canonical InvoiceData by the persistent canvas worker.
+ * Generate the WhatsApp chat-bubble preview for a document (invoice,
+ * payment receipt, or payment statement): a crisp JPEG of the UPPER SECTION
+ * of the Prestige design rendered directly from the canonical document data
+ * by the persistent canvas worker — every document kind through the SAME
+ * infrastructure.
  *
  * NEVER rejects and never blocks the caller on failure — a cosmetic preview
- * is not allowed to break an invoice send. Any failure resolves with
+ * is not allowed to break a document send. Any failure resolves with
  * `jpeg: null` (plus a warning log).
  */
-export async function generateInvoiceThumbnail(data: InvoiceData): Promise<InvoiceThumbnail> {
+export async function generateDocumentThumbnail(
+  kind: DocumentKind,
+  data: InvoiceData | ReceiptData | StatementData,
+): Promise<DocumentThumbnailResult> {
   const t0 = performance.now();
   const log = getLogger();
 
   let reply: WorkerReply;
   try {
-    reply = await requestThumbnail(data);
+    reply = await requestThumbnail(kind, data);
   } catch (err) {
     // requestThumbnail never rejects, but stay defensive.
     reply = { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -1068,53 +1250,38 @@ export async function generateInvoiceThumbnail(data: InvoiceData): Promise<Invoi
 
   if (!reply.ok) {
     log.warn(
-      { reason: reply.error, ms: Math.round(totalMs) },
-      'Invoice thumbnail generation failed — sending without chat preview',
+      { kind, reason: reply.error, ms: Math.round(totalMs) },
+      'Document thumbnail generation failed — sending without chat preview',
     );
-    return {
-      jpeg: null, width: null, height: null, rows: null, tradeInRows: null,
-      bottomPt: null, ms: { total: totalMs, draw: null, encode: null },
-    };
+    return { jpeg: null, width: null, height: null, ms: totalMs };
   }
 
   if (!reply.jpeg || reply.jpeg.length === 0 || reply.jpeg[0] !== 0xff || reply.jpeg[1] !== 0xd8) {
     log.warn(
-      { bytes: reply.jpeg?.length ?? 0 },
-      'Invoice thumbnail produced invalid JPEG data — sending without chat preview',
+      { kind, bytes: reply.jpeg?.length ?? 0 },
+      'Document thumbnail produced invalid JPEG data — sending without chat preview',
     );
-    return {
-      jpeg: null, width: null, height: null, rows: null, tradeInRows: null,
-      bottomPt: null, ms: { total: totalMs, draw: null, encode: null },
-    };
+    return { jpeg: null, width: null, height: null, ms: totalMs };
   }
 
   log.info(
     {
+      kind,
       width: reply.w,
       height: reply.h,
-      rows: reply.rows,
-      tradeInRows: reply.tradeInRows,
       bytes: reply.jpeg.length,
       ms: Math.round(totalMs),
       drawMs: reply.ms.draw,
       encodeMs: reply.ms.encode,
     },
-    'Invoice thumbnail generated (Prestige upper-section preview)',
+    'Document thumbnail generated (Prestige upper-section preview)',
   );
 
-  return {
-    jpeg: reply.jpeg,
-    width: reply.w,
-    height: reply.h,
-    rows: reply.rows,
-    tradeInRows: reply.tradeInRows,
-    bottomPt: reply.bottomPt,
-    ms: { total: totalMs, draw: reply.ms.draw, encode: reply.ms.encode },
-  };
+  return { jpeg: reply.jpeg, width: reply.w, height: reply.h, ms: totalMs };
 }
 
 /**
- * Start the persistent worker at backend startup so the first invoice send
+ * Start the persistent worker at backend startup so the first document send
  * does not pay the Node/canvas/font initialization cost.
  * Never throws — a failed warmup only means the first send pays it instead.
  */

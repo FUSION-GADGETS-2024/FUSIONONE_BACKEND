@@ -21,12 +21,33 @@ import { requireAuthorizedUser, requireOwner } from './authorize.js';
 import { registerUserRoutes } from './users.js';
 import { AppError, ErrorCode, toAppError } from '../errors/registry.js';
 import { WhatsAppState } from '../state/whatsapp-states.js';
-import { parseSendInvoiceRequest } from '../send/schema.js';
-import { sendInvoiceById } from '../invoice/send.js';
+import { parseSendInvoiceRequest } from '../messages/schema.js';
+import {
+  parseSendReceiptRequest,
+  parseSendReminderRequest,
+  parseSendStatementRequest,
+  parseReminderSettingsRequest,
+} from '../messages/schema.js';
+import { sendInvoiceMessage } from '../messages/send.js';
+import { loadMessageSettings } from '../messages/templates.js';
+import { getUserClient } from '../supabase/clients.js';
+import {
+  cancelPendingAutoSendJobs,
+  claimDueMessageJobs,
+  createInvoiceAutoSendJob,
+  createReceiptJob,
+  createStatementJob,
+  messageWorkerId,
+  requireSystemClient,
+  runClaimedJob,
+  triggerReminderNow,
+  upsertReminderConfig,
+} from '../messages/message-jobs.js';
+import type { MessageScheduler } from '../messages/scheduler.js';
 import type { WhatsAppManager } from '../whatsapp/WhatsAppManager.js';
 import type { SecurityManager } from '../security/SecurityManager.js';
 import type { SessionManager } from '../session/SessionManager.js';
-import type { SendController } from '../send/SendController.js';
+import type { SendController } from '../whatsapp/SendController.js';
 import type { StateMachine } from '../state/state-machine.js';
 import type { WhatsAppStateValue } from '../state/whatsapp-states.js';
 import type { ClientPresence } from '../whatsapp/ClientPresence.js';
@@ -40,6 +61,9 @@ export interface ServerDeps {
   /** Authenticated client presence (fed by the SSE route; drives runtime
    *  demand and the automatic wake). */
   clientPresence: ClientPresence;
+  /** The durable message scheduler (may be inactive when the system
+   *  client is unconfigured — message endpoints then fail closed). */
+  messageScheduler: MessageScheduler;
 }
 
 export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -290,19 +314,214 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
     });
   });
 
-  // POST /api/whatsapp/sendInvoice — send an invoice by reference
+  // POST /api/messages/sendInvoice — send an invoice message by reference
   // {invoiceId, invoiceType, requestId?}. The backend loads the authoritative
   // invoice from Supabase (under the VERIFIED user's JWT — identity never
-  // comes from the body), renders the PDF, and sends ONE WhatsApp document
-  // message. The legacy image-based contract is rejected. Any authorized app
-  // user may send.
-  app.post('/api/whatsapp/sendInvoice', async (req: FastifyRequest, reply: FastifyReply) => {
+  // comes from the body), prepares the document (PDF + thumbnail), and sends
+  // ONE WhatsApp document message. The legacy image-based contract is
+  // rejected. Any authorized app user may send. A pending AUTO-SEND job for
+  // the same invoice is cancelled first — the user's explicit send fulfils
+  // the same intent (no double send).
+  app.post('/api/messages/sendInvoice', async (req: FastifyRequest, reply: FastifyReply) => {
     const user = await requireAuthorizedUser(req);
     const input = parseSendInvoiceRequest(req.body);
 
-    const result = await sendInvoiceById(deps.sendController, { ...input, accessToken: user.token });
+    // The manual action supersedes a pending auto-send for this invoice.
+    await cancelPendingAutoSendJobs({
+      saleId: input.invoiceType === 'sale' ? input.invoiceId : undefined,
+      purchaseId: input.invoiceType === 'purchase' ? input.invoiceId : undefined,
+      proformaId: input.invoiceType === 'proforma' ? input.invoiceId : undefined,
+    });
+
+    const result = await sendInvoiceMessage(deps.sendController, {
+      ...input,
+      db: getUserClient(user.token),
+    });
 
     reply.code(200).send(result);
+  });
+
+  // POST /api/messages/autoSend — arm the DURABLE server-side auto-send for
+  // a freshly created invoice (the sessionStorage intent is gone). The
+  // auto_send_* flag is re-validated server-side under the caller's
+  // identity; the job executes via the scheduler (browser-independent,
+  // restart-safe). Any authorized app user may arm it.
+  app.post('/api/messages/autoSend', async (req: FastifyRequest, reply: FastifyReply) => {
+    const user = await requireAuthorizedUser(req);
+    const input = parseSendInvoiceRequest(req.body);
+    requireSystemClient(); // fail closed when messaging is unconfigured
+
+    // Server-side re-validation of the auto-send flag (the browser's read
+    // is UX only — this is the authority).
+    const settings = await loadMessageSettings(getUserClient(user.token));
+    const autoSendEnabled =
+      input.invoiceType === 'sale'
+        ? settings?.auto_send_sale === true
+        : input.invoiceType === 'purchase'
+          ? settings?.auto_send_purchase === true
+          : settings?.auto_send_proforma === true;
+
+    if (!autoSendEnabled) {
+      reply.code(200).send({ success: true, created: false, reason: 'disabled' });
+      return;
+    }
+
+    const result = await createInvoiceAutoSendJob(input.invoiceId, input.invoiceType);
+    if (!result.created) {
+      // A pending/processing auto-send already exists — nothing to do.
+      reply.code(200).send({ success: true, created: false, reason: 'already_pending', jobId: undefined });
+      return;
+    }
+
+    // Execute promptly (the scheduler claims due jobs on the next tick;
+    // the poke makes that immediate).
+    deps.messageScheduler.poke();
+
+    reply.code(202).send({ success: true, created: true, jobId: result.job.id });
+  });
+
+  // POST /api/messages/sendReceipt — manually send a payment receipt by
+  // reference {paymentId, direction}. This is the MANUAL path (the Payments
+  // dialog / Payments page row action); automatic receipt jobs for
+  // SUBSEQUENT payments are created transactionally by the payment RPCs and
+  // executed by the scheduler. The backend creates the durable job, claims
+  // it, executes it inline, and returns the outcome. The payment itself is
+  // NEVER affected by a message failure.
+  app.post('/api/messages/sendReceipt', async (req: FastifyRequest, reply: FastifyReply) => {
+    const user = await requireAuthorizedUser(req);
+    const input = parseSendReceiptRequest(req.body);
+    requireSystemClient();
+
+    const created = await createReceiptJob(input.paymentId, input.direction);
+    if (!created.created) {
+      // The pending job may be the AUTOMATIC receipt for this exact payment
+      // (auto-send ON) or another manual send — either way it is already
+      // being delivered; exactly one receipt goes out.
+      throw new AppError(ErrorCode.MESSAGE_JOB_CONFLICT, {
+        message: 'A receipt for this payment is already being delivered. Please wait for it to finish.',
+        internalDetails: { paymentId: input.paymentId, direction: input.direction },
+      });
+    }
+
+    // Claim + execute inline (the SAME executor the scheduler uses); the
+    // business data loads under the CALLER's identity (RLS).
+    const [job] = await claimDueMessageJobs(messageWorkerId(), 1, created.job.id);
+    if (!job) {
+      // The scheduler raced us to the claim — it is already executing.
+      reply.code(200).send({ success: true, status: 'processing', jobId: created.job.id });
+      return;
+    }
+
+    const result = await runClaimedJob(deps.sendController, job, getUserClient(user.token), {
+      trigger: 'manual',
+    });
+    reply.code(200).send({
+      success: result.outcome === 'success',
+      status: result.status,
+      jobId: job.id,
+      ...(result.error ? { error: result.error } : {}),
+    });
+  });
+
+  // POST /api/messages/sendStatement — manually send the Payment Statement
+  // for an invoice/bill {invoiceId, invoiceType: sale|purchase}. A statement
+  // represents ALL payments against the invoice (including the initial
+  // creation-time payment) and is composed from CURRENT authoritative data
+  // at send time. Statements are MANUAL ONLY — no payment operation ever
+  // creates one. Same durable-job + inline-execution contract as sendReceipt.
+  app.post('/api/messages/sendStatement', async (req: FastifyRequest, reply: FastifyReply) => {
+    const user = await requireAuthorizedUser(req);
+    const input = parseSendStatementRequest(req.body);
+    requireSystemClient();
+
+    const direction = input.invoiceType === 'sale' ? 'in' : 'out';
+    const created = await createStatementJob(input.invoiceId, direction);
+    if (!created.created) {
+      // A statement for this invoice is already being delivered (double
+      // click / race). A LATER request — after the first job reached a
+      // terminal state — legitimately creates a fresh job.
+      throw new AppError(ErrorCode.MESSAGE_JOB_CONFLICT, {
+        message: 'A payment statement for this invoice is already being delivered. Please wait for it to finish.',
+        internalDetails: { invoiceId: input.invoiceId, invoiceType: input.invoiceType },
+      });
+    }
+
+    const [job] = await claimDueMessageJobs(messageWorkerId(), 1, created.job.id);
+    if (!job) {
+      reply.code(200).send({ success: true, status: 'processing', jobId: created.job.id });
+      return;
+    }
+
+    const result = await runClaimedJob(deps.sendController, job, getUserClient(user.token), {
+      trigger: 'manual',
+    });
+    reply.code(200).send({
+      success: result.outcome === 'success',
+      status: result.status,
+      jobId: job.id,
+      ...(result.error ? { error: result.error } : {}),
+    });
+  });
+
+  // POST /api/messages/sendReminder — manually trigger a payment reminder
+  // for a sale invoice NOW {saleId}. Converges with the scheduled reminder
+  // path on the SAME executor; the scheduled job (if any) is pulled forward
+  // rather than duplicated.
+  app.post('/api/messages/sendReminder', async (req: FastifyRequest, reply: FastifyReply) => {
+    const user = await requireAuthorizedUser(req);
+    const input = parseSendReminderRequest(req.body);
+    requireSystemClient();
+
+    const job = await triggerReminderNow(input.saleId);
+
+    const [claimed] = await claimDueMessageJobs(messageWorkerId(), 1, job.id);
+    if (!claimed) {
+      reply.code(200).send({ success: true, status: 'processing', jobId: job.id });
+      return;
+    }
+
+    const result = await runClaimedJob(deps.sendController, claimed, getUserClient(user.token), {
+      trigger: 'manual',
+    });
+    reply.code(200).send({
+      success: result.outcome === 'success',
+      status: result.status,
+      jobId: claimed.id,
+      ...(result.error ? { error: result.error } : {}),
+    });
+  });
+
+  // PUT /api/messages/reminder-settings/:saleId — create/update the
+  // per-invoice reminder configuration. The RPC reconciles the durable next
+  // job atomically (enable → ensure chain when eligible; disable → cancel
+  // pending jobs). Any authorized app user (shared business data).
+  app.put('/api/messages/reminder-settings/:saleId', async (req: FastifyRequest, reply: FastifyReply) => {
+    await requireAuthorizedUser(req);
+    requireSystemClient();
+
+    const params = req.params as { saleId?: string };
+    const saleId = params?.saleId ?? '';
+    const uuidOk = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(saleId);
+    if (!uuidOk) {
+      throw new AppError(ErrorCode.API_REQUEST_INVALID, {
+        message: 'A valid sale id is required.',
+      });
+    }
+
+    const body = parseReminderSettingsRequest(req.body);
+    const result = await upsertReminderConfig({
+      saleId,
+      enabled: body.enabled,
+      frequencyDays: body.frequencyDays,
+      maxReminders: body.maxReminders,
+    });
+
+    reply.code(200).send({
+      success: true,
+      config: result.config,
+      jobCreated: result.job_created,
+      jobsCancelled: result.jobs_cancelled,
+    });
   });
 
   // POST /api/whatsapp/logout — destroy the session (fail closed).
