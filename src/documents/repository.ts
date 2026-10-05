@@ -45,10 +45,25 @@ function requireRow<T>(row: T | null, invoiceId: string): T {
   return row;
 }
 
+/** Trade-in row shape after the architectural redesign: the TRANSACTIONAL
+ * facts live on the row; the physical device identity is resolved through
+ * the Inventory relationship (the single source of truth). */
+export interface SaleTradeInRow {
+  credit_value: string | number;
+  mrp: string | number | null;
+  inventory_items: {
+    brand: string | null;
+    model: string | null;
+    imei: string | null;
+    ram_rom: string | null;
+    color: string | null;
+  } | null;
+}
+
 export interface SaleInvoiceRows {
   sale: any;
   items: any[];
-  tradeIns: any[];
+  tradeIns: SaleTradeInRow[];
   store: any;
   /** Per-invoice reminder configuration (null when none was configured). */
   reminderConfig: ReminderConfigRow | null;
@@ -70,7 +85,10 @@ export async function loadSaleInvoice(invoiceId: string, db: SupabaseClient): Pr
       .from('sale_items')
       .select('sold_price, inventory_item_id, inventory_items (brand, model, imei, ram_rom, color, base_selling_price)')
       .eq('sale_id', invoiceId),
-    db.from('trade_ins').select('brand, model, imei, ram_rom, color, credit_value, mrp').eq('sale_id', invoiceId),
+    db
+      .from('trade_ins')
+      .select('credit_value, mrp, inventory_items (brand, model, imei, ram_rom, color)')
+      .eq('sale_id', invoiceId),
     resolveStore(db),
   ]);
 
@@ -112,7 +130,10 @@ export async function loadSaleInvoice(invoiceId: string, db: SupabaseClient): Pr
   return {
     sale,
     items: itemsRes.data ?? [],
-    tradeIns: tradeInsRes.data ?? [],
+    // PostgREST returns the embedded inventory row as a single object; the
+    // generated client type models it as an array, so the rows are cast to
+    // the runtime shape.
+    tradeIns: (tradeInsRes.data ?? []) as unknown as SaleTradeInRow[],
     store,
     reminderConfig,
   };
@@ -154,7 +175,21 @@ export async function loadPurchaseInvoice(invoiceId: string, db: SupabaseClient)
 
 export interface ProformaInvoiceRows {
   proforma: any;
-  items: any[];
+  items: Array<{
+    description: string | null;
+    qty: number;
+    rate: string | number;
+    discount: string | number;
+    value: string | number;
+    inventory_item_id: string | null;
+    inventory_items: {
+      brand: string | null;
+      model: string | null;
+      imei: string | null;
+      ram_rom: string | null;
+      color: string | null;
+    } | null;
+  }>;
   tradeIns: any[];
   store: any;
 }
@@ -162,7 +197,13 @@ export interface ProformaInvoiceRows {
 export async function loadProformaInvoice(invoiceId: string, db: SupabaseClient): Promise<ProformaInvoiceRows> {
   const [proformaRes, itemsRes, tradeInsRes, store] = await Promise.all([
     db.from('proforma_invoices').select('*, parties (name, number, address)').eq('id', invoiceId).maybeSingle(),
-    db.from('proforma_invoice_items').select('description, qty, rate, discount, value').eq('proforma_invoice_id', invoiceId),
+    db
+      .from('proforma_invoice_items')
+      .select(
+        'description, qty, rate, discount, value, inventory_item_id, ' +
+          'inventory_items (brand, model, imei, ram_rom, color)',
+      )
+      .eq('proforma_invoice_id', invoiceId),
     db.from('proforma_trade_ins').select('description, qty, rate, value').eq('proforma_invoice_id', invoiceId),
     resolveStore(db),
   ]);
@@ -188,7 +229,12 @@ export async function loadProformaInvoice(invoiceId: string, db: SupabaseClient)
 
   const proforma = requireRow(proformaRes.data, invoiceId);
 
-  return { proforma, items: itemsRes.data ?? [], tradeIns: tradeInsRes.data ?? [], store };
+  return {
+    proforma,
+    items: (itemsRes.data ?? []) as unknown as ProformaInvoiceRows['items'],
+    tradeIns: tradeInsRes.data ?? [],
+    store,
+  };
 }
 
 // ─── Payment documents ──────────────────────────────────────────────────────

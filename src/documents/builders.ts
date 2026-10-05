@@ -21,7 +21,7 @@ import type {
   ReceiptData,
   StatementData,
 } from './types.js';
-import type { PaymentReceiptRows, PaymentStatementRows } from './repository.js';
+import type { PaymentReceiptRows, PaymentStatementRows, ProformaInvoiceRows, SaleTradeInRow } from './repository.js';
 
 function n(v: unknown): number {
   return Number(v) || 0;
@@ -37,7 +37,7 @@ export function buildSaleInvoiceData({
 }: {
   sale: any;
   items: any[];
-  tradeIns: any[];
+  tradeIns: SaleTradeInRow[];
   store: any;
 }): InvoiceData {
   const mappedItems: InvoiceLineItem[] = items.map((line) => {
@@ -61,10 +61,12 @@ export function buildSaleInvoiceData({
   const subtotal = mappedItems.reduce((s, i) => s + (i.rate ?? 0), 0);
   const additionalDiscount = n(sale.discount);
 
+  // Trade-in device identity is resolved through the Inventory relationship
+  // (the single authoritative source) — never from a second copy.
   const mappedTradeIns: InvoiceTradeIn[] = tradeIns.map((ti) => ({
-    brand: ti.brand,
-    model: ti.model,
-    imei: ti.imei,
+    brand: ti.inventory_items?.brand ?? undefined,
+    model: ti.inventory_items?.model ?? undefined,
+    imei: ti.inventory_items?.imei ?? undefined,
     qty: 1,
     rate: n(ti.credit_value),
     credit_value: n(ti.credit_value),
@@ -135,17 +137,35 @@ export function buildProformaInvoiceData({
   store,
 }: {
   proforma: any;
-  items: any[];
+  items: ProformaInvoiceRows['items'];
   tradeIns: any[];
   store: any;
 }): InvoiceData {
-  const mappedItems: InvoiceLineItem[] = items.map((line) => ({
-    description: line.description,
-    qty: n(line.qty),
-    rate: n(line.rate),
-    discount: n(line.discount),
-    value: n(line.value),
-  }));
+  // A quoted line is either an Inventory-backed quotation (identity from
+  // the quoted device — the authoritative source) or a legacy free-text
+  // line (its stored description is the historical truth).
+  const mappedItems: InvoiceLineItem[] = items.map((line) => {
+    if (line.inventory_item_id && line.inventory_items) {
+      return {
+        brand: line.inventory_items.brand ?? undefined,
+        model: line.inventory_items.model ?? undefined,
+        imei: line.inventory_items.imei ?? undefined,
+        ram_rom: line.inventory_items.ram_rom ?? undefined,
+        color: line.inventory_items.color ?? undefined,
+        qty: n(line.qty),
+        rate: n(line.rate),
+        discount: n(line.discount),
+        value: n(line.value),
+      };
+    }
+    return {
+      description: line.description ?? undefined,
+      qty: n(line.qty),
+      rate: n(line.rate),
+      discount: n(line.discount),
+      value: n(line.value),
+    };
+  });
 
   const mappedTradeIns: InvoiceTradeIn[] = tradeIns.map((ti) => ({
     description: ti.description,
