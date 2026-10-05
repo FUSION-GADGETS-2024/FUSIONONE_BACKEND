@@ -48,7 +48,7 @@ Baileys, the document/message pipeline, and user management. It provides:
 | `SUPABASE_PUBLISHABLE_KEY` | Supabase publishable key — combined with the requesting user's JWT for every data access (RLS-enforced). |
 | `SUPABASE_SECRET_KEY` | Server-only Supabase secret key — the SYSTEM-CONTEXT credential, used for exactly two system-level responsibilities: owner-controlled Auth administration (user invitations / user listing) and the durable message system (scheduler job state + background business-data loads for job execution). Never used for user-requested business reads/writes (those run under the CALLER's JWT + RLS), never exposed to any frontend. Empty/unset = user management AND the message scheduler fail closed. |
 | `APP_BASE_URL` | Public origin of the frontend app — invitation / password-reset email links redirect to `<APP_BASE_URL>/set-password`. |
-| `CLIENT_ORIGIN` | Allowed CORS browser origins (comma-separated list; `*` for dev sandboxes only) |
+| `CLIENT_ORIGIN` | Allowed CORS browser origins (comma-separated; production `https://one.fusiongadgets.in`; `*` for dev sandboxes only) |
 | `WHATSAPP_AUTH_DIR` | Baileys auth state storage (default `./data/whatsapp/auth`) |
 | `EXPECTED_WHATSAPP_JID` | Optional WhatsApp identity pin |
 | `WHATSAPP_CLIENT_DISCONNECT_GRACE_MS` | Runtime retention: after the LAST authenticated frontend client disconnects (and no other runtime demand exists), the Baileys runtime keeps running for this long before the intentional stop (session preserved). Default 300000 (5 minutes). |
@@ -86,7 +86,9 @@ the strict request schema).
 ### CORS
 
 The backend allows a list of browser origins via the `CLIENT_ORIGIN`
-environment variable (comma-separated; default `http://localhost:5173`).
+environment variable (comma-separated). Production uses
+`https://one.fusiongadgets.in`; the local default is
+`http://localhost:5173`.
 
 - Only requests with an `Origin` header in the list receive CORS response
   headers.
@@ -1870,7 +1872,8 @@ Raw internal exceptions are never exposed — they are mapped to
    recipient.
 
 9. **CORS.** The backend allows requests from the configured `CLIENT_ORIGIN`
-   (default: `http://localhost:5173`). No additional CORS configuration is
+   (production: `https://one.fusiongadgets.in`; local default:
+   `http://localhost:5173`). No additional CORS configuration is
    needed on the client side — the browser handles it automatically.
 
 ---
