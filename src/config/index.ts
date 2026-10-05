@@ -94,11 +94,9 @@ function parseEnv(): unknown {
     supabasePublishableKey: str(process.env.SUPABASE_PUBLISHABLE_KEY),
     supabaseSecretKey: str(process.env.SUPABASE_SECRET_KEY),
     appBaseUrl: str(process.env.APP_BASE_URL).replace(/\/+$/, ''),
-    // Browsers send the Origin header without a trailing slash (scheme://host[:port]),
-    // so a configured value is normalized the same way before comparison.
     allowedOrigins: str(process.env.CLIENT_ORIGIN, 'http://localhost:5173')
       .split(',')
-      .map((o) => o.trim().replace(/\/+$/, ''))
+      .map((o) => o.trim())
       .filter((o) => o.length > 0),
     whatsappAuthDir: str(process.env.WHATSAPP_AUTH_DIR, './data/whatsapp/auth'),
     expectedWhatsappJid: str(process.env.EXPECTED_WHATSAPP_JID, ''),
