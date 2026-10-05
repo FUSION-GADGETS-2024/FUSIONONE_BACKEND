@@ -89,7 +89,7 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
       }
     },
     credentials: false,
-    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Authorization', 'Content-Type', 'Accept', 'Accept-Language', 'Cache-Control', 'Pragma', 'X-Client-Info', 'X-Supabase-Api-Version'],
   });
 
