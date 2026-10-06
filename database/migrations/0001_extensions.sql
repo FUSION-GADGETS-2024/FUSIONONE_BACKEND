@@ -1,0 +1,12 @@
+-- ============================================================
+-- FUSIONONE — 0001 Extensions
+-- ============================================================
+-- btree_gist is required by the financial-year no-overlap GiST
+-- exclusion constraint (financial_years.fy_no_overlap).
+--
+-- All other extensions present on the platform (pgcrypto, plpgsql,
+-- uuid-ossp, pg_stat_statements, supabase_vault) are Supabase-managed
+-- defaults and are intentionally NOT recreated here. gen_random_uuid()
+-- is provided by pgcrypto, which every Supabase project enables by
+-- default.
+CREATE EXTENSION IF NOT EXISTS btree_gist;

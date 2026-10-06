@@ -1,0 +1,8 @@
+# Cloudflare Pages static headers — minimal, safe production set.
+# SPA HTML caching stays on Cloudflare Pages defaults (must-revalidate) —
+# no aggressive cache rules; hashed Vite assets under /assets/ already get
+# normal long-lived CDN caching by default.
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=()

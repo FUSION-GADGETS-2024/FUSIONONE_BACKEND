@@ -1,0 +1,25 @@
+{
+  "$schema": "https://developers.cloudflare.com/workers/wrangler/configuration-schema.json",
+
+  // FUSIONONE — Cloudflare Pages deployment config (SPA only, no backend).
+  // Deploys go through `npm run deploy:pages`, which reads this file:
+  //   1. `vars` below are exported as build-time env for `npm run build`
+  //      (Vite bakes VITE_* into the bundle), then
+  //   2. `dist/` is uploaded with `wrangler pages deploy` to `name`.
+  // NOTE: `wrangler pages deploy` does NOT read this file natively —
+  // `scripts/deploy-pages.mjs` is the bridge. Do NOT run bare
+  // `wrangler deploy` here (that targets Workers, not this Pages project).
+  "name": "fusionone",
+
+  // Static SPA output produced by `npm run build` (tsc -b && vite build).
+  "pages_build_output_dir": "dist",
+
+  // Browser-safe values only (bundled into public JS — never put secrets here:
+  // no service-role key, no PING_TOKEN, no backend API token).
+  // Mirrors .env.local (TEST Supabase project).
+  "vars": {
+    "VITE_SUPABASE_URL": "https://egdrnhtmclvhsfjvhyam.supabase.co",
+    "VITE_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_p5O1dGMmpZyvZpsa4Rhl0w_klQgHD2d",
+    "VITE_FUSIONONE_BACKEND_BASE": "https://backend-fusionone.fusiongadgets.in"
+  }
+}

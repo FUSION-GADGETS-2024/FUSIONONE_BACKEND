@@ -1,0 +1,39 @@
+{
+  "id": "b56dbf8a-0d67-4f26-8fa1-e615f04f4291",
+  "aud": "authenticated",
+  "role": "authenticated",
+  "email": "owner@fusionone.test",
+  "email_confirmed_at": "2026-09-29T14:45:59.92124813Z",
+  "phone": "",
+  "app_metadata": {
+    "provider": "email",
+    "providers": [
+      "email"
+    ]
+  },
+  "user_metadata": {
+    "email_verified": true,
+    "full_name": "FUSION GADGETS Owner (Test)"
+  },
+  "identities": [
+    {
+      "identity_id": "c9c866e0-2959-48fc-b654-332a25ba606e",
+      "id": "b56dbf8a-0d67-4f26-8fa1-e615f04f4291",
+      "user_id": "b56dbf8a-0d67-4f26-8fa1-e615f04f4291",
+      "identity_data": {
+        "email": "owner@fusionone.test",
+        "email_verified": false,
+        "phone_verified": false,
+        "sub": "b56dbf8a-0d67-4f26-8fa1-e615f04f4291"
+      },
+      "provider": "email",
+      "last_sign_in_at": "2026-09-29T14:45:59.913346541Z",
+      "created_at": "2026-09-29T14:45:59.913426Z",
+      "updated_at": "2026-09-29T14:45:59.913426Z",
+      "email": "owner@fusionone.test"
+    }
+  ],
+  "created_at": "2026-09-29T14:45:59.901208Z",
+  "updated_at": "2026-09-29T14:45:59.923762Z",
+  "is_anonymous": false
+}
