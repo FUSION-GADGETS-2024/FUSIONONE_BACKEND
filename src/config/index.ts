@@ -72,6 +72,23 @@ const ConfigSchema = z.object({
   /** GET /ping probe token (X-Ping-Token header). Empty/unset = /ping fails
    *  closed (always 401). Environment-only — never shipped to any frontend. */
   pingToken: z.string().default(''),
+
+  // ── Party documents (private Cloudflare R2 + envelope encryption) ──────
+  /** R2 account id (the S3 endpoint host component). Empty = document
+   *  endpoints fail closed — the same unconfigured-fail-closed convention
+   *  as the message scheduler. */
+  r2AccountId: z.string().default(''),
+  r2AccessKeyId: z.string().default(''),
+  r2SecretAccessKey: z.string().default(''),
+  r2Bucket: z.string().default(''),
+
+  /** Server-only master key (base64 of 32 bytes) wrapping every per-document
+   *  data encryption key. NEVER exposed to any frontend and never logged. */
+  documentsMasterKey: z.string().default(''),
+
+  /** Maximum accepted document upload size in bytes (enforced while the
+   *  multipart stream is read — never after buffering). */
+  maxDocumentFileBytes: z.number().int().min(1024),
 });
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
@@ -114,6 +131,12 @@ function parseEnv(): unknown {
     maxRequestBodyBytes: num(process.env.MAX_REQUEST_BODY_BYTES, 10485760),
     logLevel: str(process.env.LOG_LEVEL, 'info') as AppConfig['logLevel'],
     pingToken: str(process.env.PING_TOKEN, ''),
+    r2AccountId: str(process.env.R2_ACCOUNT_ID),
+    r2AccessKeyId: str(process.env.R2_ACCESS_KEY_ID),
+    r2SecretAccessKey: str(process.env.R2_SECRET_ACCESS_KEY),
+    r2Bucket: str(process.env.R2_BUCKET, 'fusionone-documents'),
+    documentsMasterKey: str(process.env.DOCUMENTS_MASTER_KEY),
+    maxDocumentFileBytes: num(process.env.MAX_DOCUMENT_FILE_BYTES, 10485760),
   };
 }
 
