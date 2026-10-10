@@ -22,10 +22,9 @@ import {
 import { ListPage } from '@/components/list-page/ListPage';
 import { staticPagination } from '@/components/list-page/use-list-pagination';
 import { useParties, usePartiesLedger, usePartyDirectorySearch, type PartyDirectoryRow } from '@/features/parties/api';
+import { computePartyLedgers } from '@/features/analytics/metrics';
 import { formatPhoneDisplay } from '@/features/validation/fields';
 import { invalidateParties } from '@/features/invalidate';
-
-interface PartyLedger { partyId: string; salesTotal: number; salesDue: number; purchasesTotal: number; purchasesDue: number; }
 
 const fmt = (n: number) => `${n.toLocaleString('en-IN', { minimumFractionDigits: 2 })} Rs.`;
 
@@ -48,13 +47,7 @@ export default function PartiesPage() {
   // shimmer only starts if the wait becomes noticeable. Never delays data.
   const skeletonPulsing = useSkeletonDelay(fyLoading || partiesQuery.isLoading || ledgerQuery.isLoading);
 
-  const ledgers = useMemo(() => {
-    const map = new Map<string, PartyLedger>();
-    parties.forEach(p => map.set(p.id, { partyId: p.id, salesTotal: 0, salesDue: 0, purchasesTotal: 0, purchasesDue: 0 }));
-    sales.forEach(s => { const l = map.get(s.party_id); if (l) { l.salesTotal += Number(s.final_total || 0); l.salesDue += Number(s.due || 0); } });
-    purchases.forEach(pu => { const l = map.get(pu.party_id); if (l) { l.purchasesTotal += Number(pu.total || 0); l.purchasesDue += Number(pu.due || 0); } });
-    return map;
-  }, [parties, sales, purchases]);
+  const ledgers = useMemo(() => computePartyLedgers(parties.map((p) => p.id), sales, purchases), [parties, sales, purchases]);
 
   const filteredParties = useMemo(() => {
     // Search mode — the ONE canonical ranked directory search (the

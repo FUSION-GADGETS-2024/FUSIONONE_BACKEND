@@ -152,6 +152,9 @@ async function main(): Promise<void> {
   }
   // Fixture parties are tagged by name prefix; remove leftovers FK-safely.
   await sql`DELETE FROM public.parties WHERE name LIKE 'VALSRCH %'`
+  // Stale fixture bank accounts from prior runs (teardown leak fixed
+  // 2026-10-07: each run used to leave one 'VALSRCH Cash' behind).
+  await sql`DELETE FROM public.bank_accounts WHERE name = 'VALSRCH Cash'`
 
   // ══════════════════════════════════════════════════════════════════════
   console.log('── A. Field validation at the DB boundary ──────────────────────')
@@ -554,7 +557,7 @@ async function main(): Promise<void> {
     [{}, 'zero products + ₹0', 'at least one item'],
     [{ discount: 500 }, 'zero products + discount', 'at least one item'],
     [{ paid: 500 }, 'zero products + payment', 'at least one item'],
-    [{ trade_ins: [{ brand: 'TI', model: 'Old', imei: nextImei(), ram_rom: '4/64', color: 'Grey', credit_value: 1000, mrp: '', document_url: '' }] },
+    [{ trade_ins: [{ brand: 'TI', model: 'Old', imei: nextImei(), ram_rom: '4/64', color: 'Grey', credit_value: 1000, mrp: '', document_id: null }] },
       'zero products + trade-in (trade-in is NOT a product)', 'at least one item'],
   ]
   for (const [extra, label, msg] of zeroCases) {
@@ -600,7 +603,7 @@ async function main(): Promise<void> {
     payload: {
       financial_year_id: fyId, party_id: partyId, date: '2032-07-04',
       items: [{ inventory_item_id: await saleItem(devs[5].imei), sold_price: 2000 }],
-      trade_ins: [{ brand: 'TI', model: 'Old Phone', imei: tiImei, ram_rom: '4/64', color: 'Grey', credit_value: 2000, mrp: '3000', document_url: '' }],
+      trade_ins: [{ brand: 'TI', model: 'Old Phone', imei: tiImei, ram_rom: '4/64', color: 'Grey', credit_value: 2000, mrp: '3000', document_id: null }],
       discount: 0, paid: 0, bank_account_id: bankId, payment_mode_id: '',
     },
   })
@@ -650,7 +653,7 @@ async function main(): Promise<void> {
     payload: {
       proforma_id: prof.proforma_id, date: '2032-07-07',
       items: [{ proforma_item_id: (await sql`SELECT id FROM public.proforma_invoice_items WHERE proforma_invoice_id = ${prof.proforma_id}`)[0].id, inventory_item_id: convItemId }],
-      trade_ins: [{ brand: 'TI', model: 'Actual Old Phone', imei: nextImei(), ram_rom: '4/64', color: 'Grey', credit_value: 2500, mrp: '', document_url: '' }],
+      trade_ins: [{ brand: 'TI', model: 'Actual Old Phone', imei: nextImei(), ram_rom: '4/64', color: 'Grey', credit_value: 2500, mrp: '', document_id: null }],
       paid: 0, bank_account_id: bankId, payment_mode_id: '',
     },
   })
@@ -689,7 +692,7 @@ async function main(): Promise<void> {
     payload: {
       proforma_id: prof2.proforma_id, date: '2032-07-09',
       items: [{ proforma_item_id: (await sql`SELECT id FROM public.proforma_invoice_items WHERE proforma_invoice_id = ${prof2.proforma_id}`)[0].id, inventory_item_id: conv2ItemId }],
-      trade_ins: [{ brand: 'TI', model: 'Bad IMEI', imei: '12345', ram_rom: '4/64', color: 'Grey', credit_value: 100, mrp: '', document_url: '' }],
+      trade_ins: [{ brand: 'TI', model: 'Bad IMEI', imei: '12345', ram_rom: '4/64', color: 'Grey', credit_value: 100, mrp: '', document_id: null }],
       paid: 0, bank_account_id: bankId, payment_mode_id: '',
     },
   }, 'exactly 15 digits', 'conversion with invalid trade-in IMEI rejected')
@@ -734,9 +737,12 @@ async function main(): Promise<void> {
     && wa[0].auto_send_receipt_in === false && wa[0].auto_send_receipt_out === false,
     'WhatsApp auto-send flags all remain false (never re-enabled)')
 
-  // ── Teardown ─────────────────────────────────────────────────────────────
+  // ── Teardown ─────────────────────────────────────────────────────────────────
   await cleanupFixtures([fyId, closedFyId])
   await sql`DELETE FROM public.parties WHERE name LIKE 'VALSRCH %'`
+  await sql`DELETE FROM public.bank_accounts WHERE name = 'VALSRCH Cash'`
+  const strayBanks = await sql`SELECT count(*)::int AS n FROM public.bank_accounts WHERE name = 'VALSRCH Cash'`
+  ok(strayBanks[0].n === 0, 'teardown left zero fixture bank accounts')
   const leftovers = await sql`
     SELECT count(*)::int AS n FROM public.inventory_items WHERE financial_year_id NOT IN (
       SELECT id FROM public.financial_years)`

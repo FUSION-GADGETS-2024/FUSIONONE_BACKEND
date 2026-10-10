@@ -9,7 +9,7 @@ import { ActionMenu } from '@/components/ui/ActionMenu';
 import type { ActionMenuItem } from '@/components/ui/ActionMenu';
 import { PaymentDialog } from '@/components/payments/PaymentDialog';
 import type { PaymentDialogInvoice } from '@/components/payments/PaymentDialog';
-import { Plus, FileDown, Share2, Printer, Wallet } from 'lucide-react';
+import { Plus, FileDown, Share2, MessageCircle, Printer, Wallet } from 'lucide-react';
 import { ViewButton } from '@/components/ui/ViewButton';
 import { useSkeletonDelay } from '@/components/ui/Skeleton';
 import { DataTable, TableSearchInput, RowActions, ListHeaderSkeleton } from '@/components/ui/tables';
@@ -41,22 +41,10 @@ export default function PurchasesPage() {
   // shimmer only starts if the wait becomes noticeable. Never delays data.
   const skeletonPulsing = useSkeletonDelay(fyLoading || purchasesQuery.isLoading);
 
-  // Direct row quick actions — one shared behavior layer for every list.
-  // They execute directly against the row's invoice and never route through
-  // the detail page.
+  // Direct row quick actions — one shared behavior layer for every list
+  // (savePdf / shareViaWhatsApp / share / print). They execute directly
+  // against the row's invoice and never route through the detail page.
   const quickActions = useInvoiceQuickActions();
-
-  const handleSavePdf = (purchase: any) => {
-    void quickActions.savePdf({ invoiceId: purchase.id, invoiceType: 'purchase', billNumber: purchase.bill_number });
-  };
-
-  const handleShare = (purchase: any) => {
-    void quickActions.share({ invoiceId: purchase.id, invoiceType: 'purchase', billNumber: purchase.bill_number });
-  };
-
-  const handlePrint = (purchase: any) => {
-    void quickActions.print({ invoiceId: purchase.id, invoiceType: 'purchase', billNumber: purchase.bill_number });
-  };
 
   const filteredPurchases = purchases.filter(p => {
     const q = searchQuery.toLowerCase();
@@ -121,9 +109,10 @@ export default function PurchasesPage() {
           menuItems.push({ icon: Wallet, label: 'Pay Party', onClick: () => openPay(p) });
         }
         menuItems.push(
-          { icon: FileDown, label: 'Save PDF', onClick: () => handleSavePdf(p) },
-          { icon: Share2, label: 'Share', onClick: () => handleShare(p) },
-          { icon: Printer, label: 'Print', onClick: () => handlePrint(p) },
+          { icon: FileDown, label: 'Save PDF', onClick: () => void quickActions.savePdf({ invoiceId: p.id, invoiceType: 'purchase', billNumber: p.bill_number }) },
+          { icon: MessageCircle, label: 'Share via WhatsApp', onClick: () => void quickActions.shareViaWhatsApp({ invoiceId: p.id, invoiceType: 'purchase', billNumber: p.bill_number }) },
+          { icon: Share2, label: 'Share', onClick: () => void quickActions.share({ invoiceId: p.id, invoiceType: 'purchase', billNumber: p.bill_number }) },
+          { icon: Printer, label: 'Print', onClick: () => void quickActions.print({ invoiceId: p.id, invoiceType: 'purchase', billNumber: p.bill_number }) },
         );
         // Stable action area — a fixed, non-shrinking group at the row's
         // right edge: [VIEW][⋮]. VIEW is the only detail navigation;

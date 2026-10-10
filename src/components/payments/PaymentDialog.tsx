@@ -100,6 +100,10 @@ export function PaymentDialog({ open, onClose, invoiceType, invoice }: PaymentDi
 
   const selectedBank = bankAccounts.find(b => b.id === bankId);
   const applicableModes = paymentModes.filter(m => m.bank_account_id === bankId);
+  // A non-cash account with NO configured payment modes: the mode field
+  // would otherwise be a required dropdown with nothing to select — guide
+  // the user to add one instead (guidance also becomes the submit error).
+  const noModesAvailable = !!selectedBank && !selectedBank.is_cash && applicableModes.length === 0;
 
   // ── Validation (per field; the receive_payment / pay_purchase RPCs stay
   //    authoritative) ──
@@ -116,7 +120,9 @@ export function PaymentDialog({ open, onClose, invoiceType, invoice }: PaymentDi
         ? `Date must be within the financial year (${selectedYear.start_date} to ${selectedYear.end_date}).`
         : null,
     account: !bankId ? 'Select an account.' : null,
-    mode: selectedBank && !selectedBank.is_cash && !modeId ? 'Select a payment mode.' : null,
+    mode: selectedBank && !selectedBank.is_cash && !modeId
+      ? (noModesAvailable ? 'Add a payment mode to this account first.' : 'Select a payment mode.')
+      : null,
   };
 
   const handleSubmit = async () => {
@@ -193,7 +199,12 @@ export function PaymentDialog({ open, onClose, invoiceType, invoice }: PaymentDi
                 options={[{ value: '', label: 'Select account' }, ...bankAccounts.map(b => ({ value: b.id, label: b.name + (b.is_cash ? ' (Cash)' : '') }))]} />
             </Field>
             {selectedBank && !selectedBank.is_cash && (
-              <Field label="Payment Mode" required error={fieldErrors.show('mode', errors.mode)}>
+              <Field
+                label="Payment Mode"
+                required
+                hint={noModesAvailable ? 'Add a payment mode to this account first.' : undefined}
+                error={fieldErrors.show('mode', errors.mode)}
+              >
                 <Select value={modeId} onChange={v => setModeId(v)}
                   options={[{ value: '', label: 'Select mode' }, ...applicableModes.map(m => ({ value: m.id, label: m.name }))]} />
               </Field>

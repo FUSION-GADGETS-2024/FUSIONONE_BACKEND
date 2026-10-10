@@ -5,6 +5,28 @@
 import { supabase } from '@/platform/supabase/client'
 import type { FinancialYear } from '@/features/types'
 
+/**
+ * Map a failed purchase save to the message the user sees.
+ *
+ * The authoritative create_purchase RPC raises its business validations
+ * as PL/pgSQL RAISE EXCEPTION (Postgres code P0001) with plain-business-
+ * language messages by contract (migration 0012): "IMEI on item 1 is
+ * invalid: it must be exactly 15 digits", "IMEI … is already in stock in
+ * the database.", "Date must be within the financial year (…)" — those
+ * pass through verbatim. Anything else (network, internal database
+ * errors, constraint names) collapses to the generic save failure so
+ * Postgres/PostgREST jargon never reaches the user. Same mapping pattern
+ * as updateOwnDisplayName in features/profile/display-name.ts.
+ */
+function mapPurchaseSaveError(err: { code?: string | null; message?: string | null }): string {
+  const message = err.message ?? ''
+  if (err.code === 'P0001' && message) return message
+  if (/network|fetch|timeout|Failed to fetch/i.test(message)) {
+    return 'Could not reach the server. Check your connection and try again.'
+  }
+  return 'Failed to save purchase.'
+}
+
 export interface CreatePurchaseItem {
   brand: string
   model: string
@@ -59,7 +81,7 @@ export async function createPurchase(params: CreatePurchaseParams): Promise<Crea
       })),
     },
   })
-  if (error) throw error
+  if (error) throw new Error(mapPurchaseSaveError(error))
   return { purchaseId: data.purchase_id, billNumber: data.bill_number }
 }
 

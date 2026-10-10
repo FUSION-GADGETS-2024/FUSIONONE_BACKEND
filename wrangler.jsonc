@@ -16,7 +16,8 @@
 
   // Browser-safe values only (bundled into public JS — never put secrets here:
   // no service-role key, no PING_TOKEN, no backend API token).
-  // Mirrors .env.local (TEST Supabase project).
+  // Mirrors .env.local (TEST Supabase project). No XTransform/XPORT mechanism —
+  // the browser calls the hosted backend directly (see src/platform/whatsapp/url.ts).
   "vars": {
     "VITE_SUPABASE_URL": "https://egdrnhtmclvhsfjvhyam.supabase.co",
     "VITE_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_p5O1dGMmpZyvZpsa4Rhl0w_klQgHD2d",

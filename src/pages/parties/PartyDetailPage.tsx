@@ -13,6 +13,7 @@ import type { DataTableColumn } from '@/components/ui/tables';
 import { ListPage } from '@/components/list-page/ListPage';
 import { useInfiniteListPagination } from '@/components/list-page/use-list-pagination';
 import { useFinancialYear } from '@/components/providers/FinancialYearProvider';
+import { PartyDocumentsTab } from '@/components/party-documents/PartyDocumentsTab';
 import {
   usePartyDetail,
   usePartyInvoices,
@@ -40,11 +41,13 @@ import type { PartyPurchaseRow, PartySaleRow } from '@/features/parties/api';
  * selected tab alongside the loaded batches (and the rows viewport
  * restores its exact scroll position).
  *
- * The two tabs are fully independent queries (separate cache keys, separate
- * accumulated batches, separate viewport restoration keys) — switching
- * tabs never mixes or refetches the other list.
+ * The two invoice tabs are fully independent queries (separate cache keys,
+ * separate accumulated batches, separate viewport restoration keys) —
+ * switching tabs never mixes or refetches the other list. The Documents
+ * tab is the party's (FY-independent) document management surface — the
+ * ONE place documents are added/previewed/downloaded/replaced/archived.
  */
-type Tab = 'sales' | 'purchases';
+type Tab = 'sales' | 'purchases' | 'documents';
 
 const fmt = (n: number) => `${n.toLocaleString('en-IN', { minimumFractionDigits: 2 })} Rs.`;
 
@@ -54,7 +57,12 @@ export default function PartyDetailPage() {
 
   // Selected tab in the URL (?tab=) — Back returns to the tab the user left.
   const [searchParams] = useSearchParams();
-  const tab: Tab = searchParams.get('tab') === 'purchases' ? 'purchases' : 'sales';
+  const tab: Tab =
+    searchParams.get('tab') === 'purchases'
+      ? 'purchases'
+      : searchParams.get('tab') === 'documents'
+        ? 'documents'
+        : 'sales';
   const navigate = useNavigate();
   const selectTab = useCallback(
     (next: Tab) => {
@@ -73,6 +81,7 @@ export default function PartyDetailPage() {
   const skeletonPulsing = useSkeletonDelay(partyQuery.isLoading || fyLoading);
   const salesQuery = usePartyInvoices('sales', id, selectedYear, fyLoading, tab === 'sales');
   const purchasesQuery = usePartyInvoices('purchases', id, selectedYear, fyLoading, tab === 'purchases');
+  // Documents are party-scoped, not FY-scoped (loaded by the tab itself).
 
   const party = partyQuery.data ?? null;
 
@@ -175,10 +184,10 @@ export default function PartyDetailPage() {
         </div>
       </div>
 
-      {/* Sales / Purchases tabs — independent accumulated lists per tab */}
+      {/* Sales / Purchases / Documents tabs — independent accumulated lists per tab */}
       <div className="flex shrink-0 items-center justify-between gap-4">
         <div className="inline-flex items-center rounded-lg bg-slate-100 p-0.5" role="tablist">
-          {(['sales', 'purchases'] as const).map((t) => (
+          {(['sales', 'purchases', 'documents'] as const).map((t) => (
             <button
               key={t}
               role="tab"
@@ -189,20 +198,23 @@ export default function PartyDetailPage() {
                 tab === t ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700',
               )}
             >
-              {t === 'sales' ? 'Sales' : 'Purchases'}
+              {t === 'sales' ? 'Sales' : t === 'purchases' ? 'Purchases' : 'Documents'}
             </button>
           ))}
         </div>
-        <p className="text-[11px] text-slate-400">
-          {selectedYear
-            ? `FY ${new Date(selectedYear.start_date).getFullYear()}–${new Date(selectedYear.end_date).getFullYear()}`
-            : ''}
-        </p>
+        {tab !== 'documents' && (
+          <p className="text-[11px] text-slate-400">
+            {selectedYear
+              ? `FY ${new Date(selectedYear.start_date).getFullYear()}–${new Date(selectedYear.end_date).getFullYear()}`
+              : ''}
+          </p>
+        )}
       </div>
 
-      {/* Invoice list — the active tab's accumulated batches (the page's
-          single scroll container: rows scroll, everything above is fixed) */}
-      {tab === 'sales' ? (
+      {/* The active tab's content: the invoice lists or the documents surface */}
+      {tab === 'documents' ? (
+        <PartyDocumentsTab partyId={id} />
+      ) : tab === 'sales' ? (
         <PartyInvoiceList
           kind="sales"
           query={salesQuery}

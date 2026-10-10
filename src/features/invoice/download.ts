@@ -1,12 +1,17 @@
 /**
- * Client-side invoice PDF download (browser-only).
+ * The invoice PDF artifact provider — the ONE frontend invoice PDF pipeline.
+ *
+ * `buildInvoicePdf` is the single authoritative operation that obtains an
+ * invoice PDF: load the invoice by reference (RLS) → compose InvoiceData
+ * with the proven builders → serve from the content-fingerprint PDF cache
+ * or render with the browser PDFKit build → return the artifact (Blob +
+ * bill number). Every browser-side consumer — the viewer (useInvoicePdf),
+ * Save PDF, Print, and native Share — is a thin action wrapper over THIS
+ * function, so they can never drift apart and all share one cache.
  *
  * Flow: load the invoice by reference (RLS) → compose InvoiceData with the
- * proven builders → render with the browser PDFKit build → trigger download
- * with filename "{bill_number}.pdf".
- *
- * `buildInvoicePdf` is the single compose step reused by every client-side
- * PDF action (download, print, viewer) so they can never drift apart.
+ * proven builders → render with the browser PDFKit build → download with
+ * the canonical filename `invoicePdfFilename(bill_number)`.
  *
  * The composed PDF is cached by content fingerprint (pdf-cache.ts): opening
  * an unchanged invoice reuses the cached document instead of re-rendering
@@ -28,6 +33,16 @@ export interface BuildInvoicePdfOptions {
    * before rendering.
    */
   force?: boolean
+}
+
+/**
+ * The canonical invoice PDF filename — the ONE naming rule, shared by every
+ * artifact consumer (Save PDF, native Share). Deriving it here keeps the
+ * download and the shared file byte-for-byte the same document the user
+ * previews.
+ */
+export function invoicePdfFilename(billNumber: string): string {
+  return `${billNumber}.pdf`
 }
 
 interface BuiltInvoicePdf {
@@ -106,7 +121,7 @@ async function composeInvoicePdf(
 
 export async function downloadInvoicePdf(invoiceId: string, invoiceType: InvoiceType): Promise<void> {
   const { blob, billNumber } = await buildInvoicePdf(invoiceId, invoiceType)
-  triggerDownload(blob, `${billNumber}.pdf`)
+  triggerDownload(blob, invoicePdfFilename(billNumber))
 }
 
 function triggerDownload(blob: Blob, filename: string) {

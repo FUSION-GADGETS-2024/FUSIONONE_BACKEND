@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "FUSION ONE Backend \u2014 production application backend (WhatsApp delivery, invoices, user management, Supabase integration)",
+  "description": "FUSION ONE Backend — production application backend (WhatsApp delivery, invoices, user management, Supabase integration)",
   "scripts": {
     "dev": "bun --hot src/index.ts",
     "build": "tsc",
@@ -14,7 +14,9 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1147.0",
     "@fastify/cors": "^11.3.0",
+    "@fastify/multipart": "^10.1.2",
     "@napi-rs/canvas": "0.1.68",
     "@supabase/supabase-js": "^2.117.2",
     "@whiskeysockets/baileys": "^6.7.18",

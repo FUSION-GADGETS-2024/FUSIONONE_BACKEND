@@ -2,13 +2,12 @@
  * FUSION ONE backend URL builder.
  *
  * The browser talks to the hosted FUSION ONE backend DIRECTLY (cross-origin,
- * Bearer JWT per request). There is no gateway, no proxy and no port-
- * forwarding hint in front of the SPA — the XTransform same-endpoint
- * architecture has been removed.
+ * Bearer JWT per request). There is no gateway, no proxy and no
+ * port-forwarding hint in front of the SPA.
  *
  * Configuration (build-time env):
  *   VITE_FUSIONONE_BACKEND_BASE — the backend origin, e.g.
- *                                https://backend-fusionone.fusiongadgets.in
+ *                                https://wa.one.fusiongadgets.in
  *
  * The origin must be listed in the backend's CLIENT_ORIGIN, since every
  * backend call is cross-origin and carries an Authorization header.

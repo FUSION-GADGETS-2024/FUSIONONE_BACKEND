@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { downloadInvoicePdf } from '@/features/invoice/download';
 import { printInvoicePdf } from '@/features/invoice/print';
+import { shareInvoicePdf } from '@/features/invoice/share';
 import { useInvoicePdf } from '@/features/invoice/useInvoicePdf';
 import { perfTraceMount } from '@/platform/perf';
 import { InvoicePdfViewer } from '@/components/invoice/InvoicePdfViewer';
@@ -77,6 +78,7 @@ export default function SaleViewPage() {
   }, [pdf.error]);
 
   const [isPdfLoading, setIsPdfLoading] = useState(false);
+  const [isShareLoading, setIsShareLoading] = useState(false);
   const [isPrintLoading, setIsPrintLoading] = useState(false);
 
   // Dialogs
@@ -124,6 +126,17 @@ export default function SaleViewPage() {
     try { await downloadInvoicePdf(id, 'sale'); }
     catch (e: any) { toastError('PDF Failed', e.message); }
     finally { setIsPdfLoading(false); }
+  };
+
+  // Native platform share of the SAME PDF artifact (share.ts — the one
+  // pipeline, cache included; a user dismissal of the share sheet is not
+  // an error).
+  const handleSharePdf = async () => {
+    if (!sale) return;
+    setIsShareLoading(true);
+    try { await shareInvoicePdf(id, 'sale'); }
+    catch (e: any) { toastError('Share Failed', e.message); }
+    finally { setIsShareLoading(false); }
   };
 
   const handlePrintPdf = async () => {
@@ -303,6 +316,8 @@ export default function SaleViewPage() {
           date={sale?.date}
           onDownloadPdf={handleDownloadPdf}
           isPdfLoading={isPdfLoading}
+          onSharePdf={handleSharePdf}
+          isShareLoading={isShareLoading}
           onPrintPdf={handlePrintPdf}
           isPrintLoading={isPrintLoading}
         >

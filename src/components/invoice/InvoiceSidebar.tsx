@@ -9,7 +9,8 @@
  *   Invoice   → customer, date (the invoice NUMBER is the page title and the
  *               payment STATUS is its inline badge — both live in the shared
  *               page header; this panel carries only the remaining metadata)
- *   Export    → Save PDF · Print (the existing download/print implementations)
+ *   Export    → Save PDF · Share · Print (the existing download/share/print
+ *               implementations — one PDF artifact behind all of them)
  *   WhatsApp  → Send via WhatsApp (the existing share-by-reference action)
  *   …children → module sections (Payment, Invoice, Quotation …)
  *
@@ -17,7 +18,7 @@
  * them. It renders no invoice data of its own.
  */
 import type { ReactNode } from 'react';
-import { FileDown, Printer } from 'lucide-react';
+import { FileDown, Printer, Share2 } from 'lucide-react';
 import { cn } from '@/components/ui/utils';
 import type { InvoiceType } from '@/features/invoice/types';
 import { InvoiceWhatsAppShare } from './InvoiceWhatsAppShare';
@@ -34,9 +35,13 @@ export interface InvoiceSidebarProps {
    *  attribute rendered as the page header's badge. */
   customer?: string | null;
   date?: string | null;
-  /** Export actions — the page's existing download / print handlers. */
+  /** Export actions — the page's existing download / share / print handlers. */
   onDownloadPdf: () => void;
   isPdfLoading?: boolean;
+  /** Native platform share of the same PDF artifact (optional — wired
+   *  wherever the platform share action is exposed). */
+  onSharePdf?: () => void;
+  isShareLoading?: boolean;
   onPrintPdf?: () => void;
   isPrintLoading?: boolean;
   /** Module sections: Payment, Invoice, Quotation … */
@@ -118,6 +123,8 @@ export function InvoiceSidebar({
   date,
   onDownloadPdf,
   isPdfLoading = false,
+  onSharePdf,
+  isShareLoading = false,
   onPrintPdf,
   isPrintLoading = false,
   children,
@@ -138,7 +145,7 @@ export function InvoiceSidebar({
         </div>
       )}
 
-      {/* ── Export ── */}
+      {/* ── Export — every action consumes the ONE PDF artifact ── */}
       <div className="p-3 space-y-2">
         <SidebarSectionLabel>Export</SidebarSectionLabel>
         <SidebarButton
@@ -148,6 +155,14 @@ export function InvoiceSidebar({
           loading={isPdfLoading}
           variant="primary"
         />
+        {onSharePdf && (
+          <SidebarButton
+            icon={Share2}
+            label={isShareLoading ? 'Preparing…' : 'Share'}
+            onClick={onSharePdf}
+            loading={isShareLoading}
+          />
+        )}
         {onPrintPdf && (
           <SidebarButton
             icon={Printer}

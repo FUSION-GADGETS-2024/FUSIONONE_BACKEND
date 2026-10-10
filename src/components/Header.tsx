@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { Link, useLocation } from 'react-router'
-import { Calendar, ChevronDown, AlertCircle, Lock, MessageCircle, Bell } from 'lucide-react'
+import { Calendar, ChevronDown, AlertCircle, Lock, MessageCircle, Bell, Info, AlertTriangle } from 'lucide-react'
 import { useFinancialYear } from '@/components/providers/FinancialYearProvider'
-import { useDashboardData } from '@/features/dashboard/api'
-import type { DashboardAlert } from '@/features/dashboard/api'
+import { useNotices } from '@/features/notices/useNotices'
+import type { Notice, NoticeSeverity } from '@/features/notices/types'
 import { cn } from '@/components/ui/utils'
 
 function fyLabel(startDate: string, endDate: string) {
@@ -14,9 +14,9 @@ function fyLabel(startDate: string, endDate: string) {
 
 /**
  * The ONE dismissal behavior of the header's dropdown menus (FY picker,
- * notifications): close on any outside pointer press and on Escape —
- * listeners exist only while the menu is open. Returns the container ref
- * the caller spreads over its menu wrapper.
+ * notices): close on any outside pointer press and on Escape — listeners
+ * exist only while the menu is open. Returns the container ref the caller
+ * spreads over its menu wrapper.
  */
 function useMenuDismiss(open: boolean, onClose: () => void) {
   const ref = useRef<HTMLDivElement>(null)
@@ -40,29 +40,57 @@ function useMenuDismiss(open: boolean, onClose: () => void) {
   return ref
 }
 
+// ── Notice rows ──────────────────────────────────────────────────────────────
+
+const SEVERITY_STYLES: Record<NoticeSeverity, { icon: typeof AlertCircle; iconClass: string; titleClass: string }> = {
+  critical: { icon: AlertCircle, iconClass: 'text-rose-500', titleClass: 'text-rose-700' },
+  warning: { icon: AlertTriangle, iconClass: 'text-amber-500', titleClass: 'text-amber-700' },
+  info: { icon: Info, iconClass: 'text-sky-500', titleClass: 'text-sky-700' },
+}
+
+function NoticeRow({ notice, onNavigate }: { notice: Notice; onNavigate: () => void }) {
+  const style = SEVERITY_STYLES[notice.severity]
+  return (
+    <Link
+      to={notice.action?.to ?? '#'}
+      onClick={onNavigate}
+      className="flex items-start gap-2.5 px-4 py-3 hover:bg-slate-50 transition-colors"
+    >
+      <style.icon className={cn('w-3 h-3 mt-px shrink-0', style.iconClass)} />
+      <div className="min-w-0">
+        <p className={cn('text-[11px] font-semibold leading-none mb-0.5', style.titleClass)}>{notice.title}</p>
+        <p className="text-[11px] text-slate-500 leading-snug">{notice.message}</p>
+        {notice.action && (
+          <p className="text-[10px] font-semibold text-indigo-600 mt-1 leading-none">{notice.action.label} →</p>
+        )}
+      </div>
+    </Link>
+  )
+}
+
 /**
- * Notifications — the compact header home of the dashboard notices
- * (outstanding dues, pending payables, …) derived from the SAME cached
- * dashboard query the Overview page folds (one query key, no duplicate
- * business calculations). Bounded by design: a fixed set of alert types
- * in a non-growing menu — never a notification system of its own.
+ * Notifications — the header home of the notice system: the derived,
+ * deduplicated attention feed (overdue receivables, aging stock, WhatsApp
+ * connection, old proformas, failed deliveries, financial-year state),
+ * computed from the SAME business semantics the Analytics workspace uses.
+ * Bounded by design: a focused detector set (features/notices/detectors.ts)
+ * in a non-growing menu — never a general notification framework.
  */
 function NotificationsMenu() {
-  const { selectedYear, isReadOnly, isLoading: fyLoading } = useFinancialYear()
-  const dashboardQuery = useDashboardData(selectedYear, isReadOnly, fyLoading)
+  const { notices, isLoading, isError, refetch } = useNotices()
 
   const [open, setOpen] = useState(false)
   const close = useCallback(() => setOpen(false), [])
   const ref = useMenuDismiss(open, close)
 
-  const alerts = dashboardQuery.data?.alerts ?? []
-  const loading = !dashboardQuery.data
+  const criticalCount = notices.filter((n) => n.severity === 'critical').length
+  const badgeClass = criticalCount > 0 ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'
 
   return (
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen((v) => !v)}
-        aria-label={`Notifications${alerts.length > 0 ? `, ${alerts.length} active` : ''}`}
+        aria-label={`Notifications${notices.length > 0 ? `, ${notices.length} active` : ''}`}
         aria-expanded={open}
         className={cn(
           'flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors select-none shrink-0',
@@ -73,9 +101,14 @@ function NotificationsMenu() {
       >
         <span className="relative flex items-center shrink-0">
           <Bell className="h-3.5 w-3.5" />
-          {alerts.length > 0 && (
-            <span className="absolute -top-1.5 -right-1.5 flex items-center justify-center min-w-[14px] h-[14px] px-[3px] rounded-full bg-amber-100 text-amber-700 text-[9px] font-bold leading-none border border-white">
-              {alerts.length}
+          {notices.length > 0 && (
+            <span
+              className={cn(
+                'absolute -top-1.5 -right-1.5 flex items-center justify-center min-w-[14px] h-[14px] px-[3px] rounded-full text-[9px] font-bold leading-none border border-white',
+                badgeClass,
+              )}
+            >
+              {notices.length}
             </span>
           )}
         </span>
@@ -94,13 +127,25 @@ function NotificationsMenu() {
             <span className="text-[10px] font-bold tracking-[0.1em] uppercase text-slate-400">
               Notifications
             </span>
-            {selectedYear && (
-              <span className="ml-auto text-[10px] text-slate-400">{fyLabel(selectedYear.start_date, selectedYear.end_date)}</span>
+            {notices.length > 0 && (
+              <span className="ml-auto text-[10px] text-slate-400">
+                {notices.length} {notices.length === 1 ? 'notice' : 'notices'}
+              </span>
             )}
           </div>
-          {loading ? (
+          {isLoading ? (
             <div className="px-4 py-5 text-xs text-slate-400">Loading notices…</div>
-          ) : alerts.length === 0 ? (
+          ) : isError ? (
+            <div className="px-4 py-5">
+              <p className="text-[11px] text-rose-600 font-medium mb-2">Couldn't load notices.</p>
+              <button
+                onClick={() => refetch()}
+                className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 transition-colors"
+              >
+                Try again
+              </button>
+            </div>
+          ) : notices.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-1.5 py-6">
               <div className="w-7 h-7 rounded-full bg-emerald-50 flex items-center justify-center">
                 <span className="text-emerald-500 text-sm">✓</span>
@@ -108,37 +153,16 @@ function NotificationsMenu() {
               <p className="text-[11px] text-slate-400">All clear</p>
             </div>
           ) : (
-            /* Bounded by construction (a fixed set of alert types) — the
-               scroll guard is a defensive backstop, not the experience. */
-            <div className="max-h-[min(20rem,60vh)] overflow-y-auto divide-y divide-slate-50">
-              {alerts.map((a, i) => (
-                <NotificationRow key={`${a.title}-${i}`} alert={a} />
+            /* Bounded by construction (a focused detector set) — the scroll
+               guard is a defensive backstop, not the experience. */
+            <div className="max-h-[min(24rem,70vh)] overflow-y-auto divide-y divide-slate-50">
+              {notices.map((notice) => (
+                <NoticeRow key={notice.id} notice={notice} onNavigate={close} />
               ))}
             </div>
           )}
         </div>
       )}
-    </div>
-  )
-}
-
-function NotificationRow({ alert }: { alert: DashboardAlert }) {
-  return (
-    <div className="flex items-start gap-2.5 px-4 py-3">
-      <AlertCircle
-        className={cn('w-3 h-3 mt-px shrink-0', alert.type === 'warning' ? 'text-amber-500' : 'text-sky-500')}
-      />
-      <div className="min-w-0">
-        <p
-          className={cn(
-            'text-[11px] font-semibold leading-none mb-0.5',
-            alert.type === 'warning' ? 'text-amber-700' : 'text-sky-700',
-          )}
-        >
-          {alert.title}
-        </p>
-        <p className="text-[11px] text-slate-500 leading-snug">{alert.message}</p>
-      </div>
     </div>
   )
 }
@@ -212,7 +236,7 @@ export default function Header() {
             Messages
           </Link>
 
-          {/* Notifications — the dashboard notices, compactly */}
+          {/* Notifications — the notice system, compactly */}
           <NotificationsMenu />
 
           {/* FY picker */}

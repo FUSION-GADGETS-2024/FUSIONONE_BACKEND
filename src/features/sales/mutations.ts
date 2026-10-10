@@ -25,7 +25,6 @@ export interface CreateTradeIn {
   color: string
   credit_value: string
   mrp: string
-  file?: File | null
 }
 
 export interface CreateSaleParams {
@@ -45,36 +44,11 @@ export interface CreateSaleResult {
   billNumber: string
 }
 
-/**
- * Upload a trade-in supporting document to the documents bucket BEFORE the
- * RPC call (upload failure is non-fatal — the sale still completes with a
- * null document URL, the preserved reference behavior).
- */
-export async function uploadTradeInDocument(file: File): Promise<string | null> {
-  try {
-    const ext = file.name.split('.').pop()
-    const fileName = `trade_in_${Date.now()}.${ext}`
-    const { data: uploadData } = await supabase.storage
-      .from('documents')
-      .upload(`trade_ins/${fileName}`, file)
-    if (uploadData) {
-      const { data: urlData } = supabase.storage
-        .from('documents')
-        .getPublicUrl(`trade_ins/${fileName}`)
-      return urlData.publicUrl
-    }
-  } catch (e) {
-    console.warn('Storage error', e)
-  }
-  return null
-}
-
-async function buildTradeInPayload(tradeIns: CreateTradeIn[]) {
-  const documentUrls: (string | null)[] = []
-  for (const ti of tradeIns) {
-    documentUrls.push(ti.file ? await uploadTradeInDocument(ti.file) : null)
-  }
-  return tradeIns.map((ti, i) => ({
+/** Build the trade-in RPC payload — device/transaction facts only.
+ *  Documents are NOT part of trade-ins; they belong exclusively to
+ *  parties (see features/party-documents). */
+function buildTradeInPayload(tradeIns: CreateTradeIn[]) {
+  return tradeIns.map((ti) => ({
     brand: ti.brand,
     model: ti.model,
     imei: ti.imei,
@@ -82,7 +56,6 @@ async function buildTradeInPayload(tradeIns: CreateTradeIn[]) {
     color: ti.color,
     credit_value: Number(ti.credit_value),
     mrp: ti.mrp === '' ? null : Number(ti.mrp),
-    document_url: documentUrls[i],
   }))
 }
 
@@ -112,7 +85,7 @@ export async function createSale(params: CreateSaleParams): Promise<CreateSaleRe
         inventory_item_id: item.id,
         sold_price: Number(item.sold_price),
       })),
-      trade_ins: await buildTradeInPayload(tradeIns),
+      trade_ins: buildTradeInPayload(tradeIns),
     },
   })
   if (error) throw error
@@ -152,7 +125,7 @@ export async function convertProforma(params: ConvertProformaParams): Promise<Cr
         proforma_item_id: f.proformaItemId,
         inventory_item_id: f.inventoryItemId,
       })),
-      trade_ins: await buildTradeInPayload(tradeIns),
+      trade_ins: buildTradeInPayload(tradeIns),
       paid,
       bank_account_id: bankAccountId,
       payment_mode_id: paymentModeId,
@@ -199,7 +172,6 @@ export interface ResoldTradeIn {
   color: string | null
   credit_value: number
   mrp: number | null
-  document_url: string | null
   purchase_id: string | null
   status: string
 }

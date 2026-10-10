@@ -32,15 +32,15 @@ export interface SaleRow {
 
 /**
  * A trade-in as the domain models it: the TRANSACTIONAL relationship
- * (credit, quoted MRP, supporting document) plus the received device,
- * whose physical identity lives in Inventory — the single source of truth.
+ * (credit, quoted MRP) plus the received device, whose physical identity
+ * lives in Inventory — the single source of truth. Documents are NOT part
+ * of trade-ins; they belong exclusively to parties.
  */
 export interface SaleTradeIn {
   id: string
   inventory_item_id: string
   credit_value: number
   mrp: number | null
-  document_url?: string | null
   inventory_items?: {
     id: string
     brand: string | null
@@ -113,7 +113,7 @@ export async function fetchSaleDetail(saleId: string): Promise<SaleDetail> {
     supabase
       .from('trade_ins')
       .select(
-        'id, inventory_item_id, credit_value, mrp, document_url, inventory_items (id, brand, model, imei, ram_rom, color, status)',
+        'id, inventory_item_id, credit_value, mrp, inventory_items (id, brand, model, imei, ram_rom, color, status)',
       )
       .eq('sale_id', saleId),
     supabase.from('store').select('*').maybeSingle(),

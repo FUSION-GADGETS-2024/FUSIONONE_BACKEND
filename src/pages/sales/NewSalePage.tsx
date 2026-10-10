@@ -49,7 +49,6 @@ interface TradeInItem {
   color: string;
   credit_value: string;
   mrp: string;
-  file?: File | null;
 }
 
 export default function NewSalePage() {
@@ -111,7 +110,7 @@ export default function NewSalePage() {
   const [isTradeInModalOpen, setIsTradeInModalOpen] = useState(false);
 
   const [tradeInForm, setTradeInForm] = useState<TradeInItem>({
-    id: '', brand: '', model: '', imei: '', ram_rom: '', color: '', credit_value: '', mrp: '', file: null
+    id: '', brand: '', model: '', imei: '', ram_rom: '', color: '', credit_value: '', mrp: ''
   });
   // Trade-in modal field errors (fresh cycle each time it opens) + the
   // duplicate-IMEI business check outcome (shown under the IMEI field).
@@ -179,6 +178,16 @@ export default function NewSalePage() {
     return Math.max(0, finalTotal - (Number(paid) || 0));
   }, [finalTotal, paid]);
 
+  // The selected account's payment modes (computed before the validation
+  // memo so the empty-modes guidance is part of the same render truth).
+  const selectedBank = bankAccounts.find(b => b.id === bankAccountId);
+  const applicableModes = paymentModes.filter(m => m.bank_account_id === bankAccountId);
+  // A non-cash account with NO configured payment modes: the required mode
+  // dropdown would otherwise have nothing to select — guide the user to add
+  // one (the guidance is also the submit error, never "Select a payment
+  // mode." with an empty list).
+  const noModesAvailable = !!selectedBank && !selectedBank.is_cash && applicableModes.length === 0;
+
   // Handlers
   const handleRemoveItem = (id: string) => {
     setSelectedItems(selectedItems.filter(i => i.id !== id));
@@ -207,11 +216,13 @@ export default function NewSalePage() {
         if (nPaid <= 0) return null;
         if (!bankAccountId) return 'Select an account for the payment.';
         const bk = bankAccounts.find(b => b.id === bankAccountId);
-        if (!bk?.is_cash && !paymentModeId) return 'Select a payment mode.';
+        if (!bk?.is_cash && !paymentModeId) {
+          return applicableModes.length === 0 ? 'Add a payment mode to this account first.' : 'Select a payment mode.';
+        }
         return null;
       })(),
     };
-  }, [partyId, date, selectedYear, selectedItems.length, paid, finalTotal, bankAccountId, paymentModeId, bankAccounts]);
+  }, [partyId, date, selectedYear, selectedItems.length, paid, finalTotal, bankAccountId, paymentModeId, bankAccounts, applicableModes.length]);
 
   const hasErrors = Object.values(errors).some(Boolean);
 
@@ -299,9 +310,6 @@ export default function NewSalePage() {
       error('Error', err instanceof Error ? err.message : 'Failed to save sale.');
     }
   };
-
-  const selectedBank = bankAccounts.find(b => b.id === bankAccountId);
-  const applicableModes = paymentModes.filter(m => m.bank_account_id === bankAccountId);
 
   if (isLoading) {
     return (
@@ -416,7 +424,7 @@ export default function NewSalePage() {
             action={
               <Button
                 onClick={() => {
-                  setTradeInForm({ id: '', brand: '', model: '', imei: '', ram_rom: '', color: '', credit_value: '', mrp: '', file: null });
+                  setTradeInForm({ id: '', brand: '', model: '', imei: '', ram_rom: '', color: '', credit_value: '', mrp: '' });
                   tradeInFieldErrors.reset();
                   setTradeInDup(false);
                   setIsTradeInModalOpen(true);
@@ -524,7 +532,12 @@ export default function NewSalePage() {
                 />
               </Field>
               {selectedBank && !selectedBank.is_cash && (
-                <Field label="Payment Mode" required error={fieldErrors.show('mode', errors.account)}>
+                <Field
+                  label="Payment Mode"
+                  required
+                  hint={noModesAvailable ? 'Add a payment mode to this account first.' : undefined}
+                  error={fieldErrors.show('mode', errors.account)}
+                >
                   <Select
                     value={paymentModeId}
                     onChange={v => setPaymentModeId(v)}
@@ -603,20 +616,6 @@ export default function NewSalePage() {
               </Field>
               <Field label="Original MRP" hint="For showing exchange bonus to customer" error={TE('mrp')}>
                 <MoneyInput value={tradeInForm.mrp} onBlur={() => tradeInFieldErrors.touch('mrp')} onChange={v => setTradeInForm({...tradeInForm, mrp: v})} placeholder="0.00" />
-              </Field>
-              <Field label="Identity / Declaration Doc (Optional)" className="sm:col-span-2 pt-1">
-                <div className="border-2 border-dashed border-slate-200 rounded-lg p-3 text-center bg-slate-50 hover:bg-slate-100 transition-colors">
-                  <input
-                    type="file"
-                    accept="image/*,.pdf"
-                    onChange={e => {
-                      if (e.target.files && e.target.files[0]) {
-                        setTradeInForm({...tradeInForm, file: e.target.files[0]});
-                      }
-                    }}
-                    className="text-xs text-slate-600 block w-full mx-auto max-w-[250px]"
-                  />
-                </div>
               </Field>
             </div>
           );

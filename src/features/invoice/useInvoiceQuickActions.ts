@@ -5,17 +5,25 @@
  * Each action executes directly against the row's invoice — it never routes
  * through the invoice detail page:
  *
- *   savePdf → existing PDF pipeline (download.ts — single rendering source)
- *   share   → existing WhatsApp message action (postSendInvoice, by reference)
- *   print   → existing PDF pipeline + browser native print (print.ts)
+ *   savePdf         → existing PDF pipeline (download.ts — single rendering source)
+ *   shareViaWhatsApp→ existing WhatsApp message action (postSendInvoice, by reference)
+ *   share           → native platform share of the SAME PDF artifact (share.ts)
+ *   print           → existing PDF pipeline + browser native print (print.ts)
  *
- * The detail page keeps its own action system; lists use this hook so the
- * two can never drift apart.
+ * `shareViaWhatsApp` and `share` are deliberately separate actions with
+ * separate implementations: WhatsApp delivery is backend-owned (data,
+ * message, PDF and transport by reference), while native share hands the
+ * browser-side PDF file to the platform share sheet. Neither ever invokes
+ * the other.
+ *
+ * The detail pages keep their own action panel; both consume the same
+ * feature-level implementations, so the two surfaces cannot drift apart.
  */
 import { useCallback } from 'react'
 import type { InvoiceType } from './types'
 import { downloadInvoicePdf } from './download'
 import { printInvoicePdf } from './print'
+import { shareInvoicePdf } from './share'
 import { postSendInvoice } from '@/platform/whatsapp/http'
 import { useToast } from '@/components/ui/Toast'
 
@@ -40,7 +48,7 @@ export function useInvoiceQuickActions() {
     }
   }, [error])
 
-  const share = useCallback(async (target: InvoiceQuickAction) => {
+  const shareViaWhatsApp = useCallback(async (target: InvoiceQuickAction) => {
     try {
       // Existing send behavior — the invoice is sent by reference to the
       // party's number; the backend owns data, message, and PDF. No extra
@@ -52,6 +60,17 @@ export function useInvoiceQuickActions() {
     }
   }, [success, error])
 
+  const share = useCallback(async (target: InvoiceQuickAction) => {
+    try {
+      // Native platform share of the invoice PDF — the same artifact the
+      // other actions use (one pipeline, one cache). Unsupported platforms
+      // reject with a clear message; a user dismissal resolves silently.
+      await shareInvoicePdf(target.invoiceId, target.invoiceType)
+    } catch (cause) {
+      error('Share Failed', messageOf(cause, 'Unable to share the invoice PDF.'))
+    }
+  }, [error])
+
   const print = useCallback(async (target: InvoiceQuickAction) => {
     try {
       await printInvoicePdf(target.invoiceId, target.invoiceType)
@@ -60,5 +79,5 @@ export function useInvoiceQuickActions() {
     }
   }, [error])
 
-  return { savePdf, share, print }
+  return { savePdf, shareViaWhatsApp, share, print }
 }

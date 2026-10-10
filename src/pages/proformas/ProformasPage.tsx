@@ -6,7 +6,7 @@ import { useFinancialYear } from '@/components/providers/FinancialYearProvider';
 import { useInvoiceQuickActions } from '@/features/invoice/useInvoiceQuickActions';
 import { Button } from '@/components/ui/Button';
 import { ActionMenu } from '@/components/ui/ActionMenu';
-import { Plus, FileDown, Share2, Printer, Pencil } from 'lucide-react';
+import { Plus, FileDown, Share2, MessageCircle, Printer, Pencil } from 'lucide-react';
 import { cn } from '@/components/ui/utils';
 import { ViewButton } from '@/components/ui/ViewButton';
 import { useSkeletonDelay } from '@/components/ui/Skeleton';
@@ -34,22 +34,10 @@ export default function ProformasPage() {
     return p.bill_number.toLowerCase().includes(s) || (p.parties?.name || '').toLowerCase().includes(s);
   });
 
-  // Direct row quick actions — one shared behavior layer for every list.
-  // They execute directly against the row's invoice and never route through
-  // the detail page.
+  // Direct row quick actions — one shared behavior layer for every list
+  // (savePdf / shareViaWhatsApp / share / print). They execute directly
+  // against the row's invoice and never route through the detail page.
   const quickActions = useInvoiceQuickActions();
-
-  const handleSavePdf = (proforma: any) => {
-    void quickActions.savePdf({ invoiceId: proforma.id, invoiceType: 'proforma', billNumber: proforma.bill_number });
-  };
-
-  const handleShare = (proforma: any) => {
-    void quickActions.share({ invoiceId: proforma.id, invoiceType: 'proforma', billNumber: proforma.bill_number });
-  };
-
-  const handlePrint = (proforma: any) => {
-    void quickActions.print({ invoiceId: proforma.id, invoiceType: 'proforma', billNumber: proforma.bill_number });
-  };
 
   // Table columns — one definition drives the desktop table and the mobile
   // cards (same renders, re-laid-out). Each render keeps the exact cell
@@ -112,9 +100,10 @@ export default function ProformasPage() {
               ...(p.status === 'active' && !isReadOnly
                 ? [{ icon: Pencil, label: 'Edit', onClick: () => navigate(`/proformas/${p.id}/edit`) }]
                 : []),
-              { icon: FileDown, label: 'Save PDF', onClick: () => handleSavePdf(p) },
-              { icon: Share2, label: 'Share', onClick: () => handleShare(p) },
-              { icon: Printer, label: 'Print', onClick: () => handlePrint(p) },
+              { icon: FileDown, label: 'Save PDF', onClick: () => void quickActions.savePdf({ invoiceId: p.id, invoiceType: 'proforma', billNumber: p.bill_number }) },
+              { icon: MessageCircle, label: 'Share via WhatsApp', onClick: () => void quickActions.shareViaWhatsApp({ invoiceId: p.id, invoiceType: 'proforma', billNumber: p.bill_number }) },
+              { icon: Share2, label: 'Share', onClick: () => void quickActions.share({ invoiceId: p.id, invoiceType: 'proforma', billNumber: p.bill_number }) },
+              { icon: Printer, label: 'Print', onClick: () => void quickActions.print({ invoiceId: p.id, invoiceType: 'proforma', billNumber: p.bill_number }) },
             ]} />
           </RowActions>
         );

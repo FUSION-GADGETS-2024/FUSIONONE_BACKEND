@@ -6,6 +6,7 @@ import { usePurchaseDetail } from '@/features/purchases/api';
 import { Wallet, ClipboardList } from 'lucide-react';
 import { downloadInvoicePdf } from '@/features/invoice/download';
 import { printInvoicePdf } from '@/features/invoice/print';
+import { shareInvoicePdf } from '@/features/invoice/share';
 import { useInvoicePdf } from '@/features/invoice/useInvoicePdf';
 import { perfTraceMount } from '@/platform/perf';
 import { InvoicePdfViewer } from '@/components/invoice/InvoicePdfViewer';
@@ -43,6 +44,7 @@ export default function PurchaseViewPage() {
   }, [pdf.error]);
 
   const [isPdfLoading, setIsPdfLoading] = useState(false);
+  const [isShareLoading, setIsShareLoading] = useState(false);
   const [isPrintLoading, setIsPrintLoading] = useState(false);
 
   // Pay — the SAME shared payment dialog the purchases list uses.
@@ -74,6 +76,17 @@ export default function PurchaseViewPage() {
     try { await downloadInvoicePdf(id, 'purchase'); }
     catch (e: any) { toastError('PDF Failed', e.message); }
     finally { setIsPdfLoading(false); }
+  };
+
+  // Native platform share of the SAME PDF artifact (share.ts — the one
+  // pipeline, cache included; a user dismissal of the share sheet is not
+  // an error).
+  const handleSharePdf = async () => {
+    if (!purchase) return;
+    setIsShareLoading(true);
+    try { await shareInvoicePdf(id, 'purchase'); }
+    catch (e: any) { toastError('Share Failed', e.message); }
+    finally { setIsShareLoading(false); }
   };
 
   const handlePrintPdf = async () => {
@@ -143,6 +156,8 @@ export default function PurchaseViewPage() {
           date={purchase?.date}
           onDownloadPdf={handleDownloadPdf}
           isPdfLoading={isPdfLoading}
+          onSharePdf={handleSharePdf}
+          isShareLoading={isShareLoading}
           onPrintPdf={handlePrintPdf}
           isPrintLoading={isPrintLoading}
         >

@@ -20,6 +20,12 @@ import BlockedPage from '@/pages/auth/BlockedPage'
 import SetupStorePage from '@/pages/auth/SetupStorePage'
 import ProfileSetupPage from '@/pages/auth/ProfileSetupPage'
 import DashboardPage from '@/pages/dashboard/DashboardPage'
+import AnalyticsLayout from '@/pages/analytics/AnalyticsLayout'
+import AnalyticsOverviewPage from '@/pages/analytics/AnalyticsOverviewPage'
+import AnalyticsSalesPage from '@/pages/analytics/AnalyticsSalesPage'
+import AnalyticsMoneyPage from '@/pages/analytics/AnalyticsMoneyPage'
+import AnalyticsInventoryPage from '@/pages/analytics/AnalyticsInventoryPage'
+import AnalyticsPurchasePage from '@/pages/analytics/AnalyticsPurchasePage'
 import SalesPage from '@/pages/sales/SalesPage'
 import NewSalePage from '@/pages/sales/NewSalePage'
 import SaleDetailPage from '@/pages/sales/SaleDetailPage'
@@ -119,6 +125,25 @@ export const router = createBrowserRouter([
             element: <AppShell />,
             children: [
               { path: 'home', element: <DashboardPage /> },
+              // Analytics — the five-tab workspace (Overview / Sales /
+              // Money / Inventory / Purchase) behind ONE horizontal top-nav
+              // layout with the shared period filter model in the URL. The
+              // former standalone Reports tab is gone: reports are Export
+              // actions inside each tab (the shared export dialog).
+              {
+                path: 'analytics',
+                element: <AnalyticsLayout />,
+                children: [
+                  { index: true, element: <AnalyticsOverviewPage /> },
+                  { path: 'sales', element: <AnalyticsSalesPage /> },
+                  { path: 'money', element: <AnalyticsMoneyPage /> },
+                  { path: 'inventory', element: <AnalyticsInventoryPage /> },
+                  { path: 'purchase', element: <AnalyticsPurchasePage /> },
+                  // The old Reports URL — one permanent redirect to the
+                  // workspace root, never a second destination.
+                  { path: 'reports', element: <Navigate to="/analytics" replace /> },
+                ],
+              },
               { path: 'sales', element: <SalesPage /> },
               { path: 'sales/new', element: <NewSalePage /> },
               { path: 'sales/:id', element: <SaleDetailPage /> },

@@ -163,7 +163,7 @@ async function main() {
   const saleItem = (id: string, price: number) => ({ inventory_item_id: id, sold_price: price })
   const tradeIn = (over: Partial<Record<string, unknown>> = {}) => ({
     brand: 'TIPI OldPhone', model: 'X1', imei: nextImei(), ram_rom: '6/64', color: 'White',
-    credit_value: 5000, mrp: 9000, document_url: null, ...over,
+    credit_value: 5000, mrp: 9000, document_id: null, ...over,
   })
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -381,8 +381,8 @@ async function main() {
      WHERE pi.inventory_item_id = ${tiC.inventory_item_id} ORDER BY p.created_at LIMIT 1`.then((r) => r[0] as any)
   ok(purchC?.status === 'cancelled', 'hidden acquisition purchase cancelled in the resold case', purchC)
   const recoveryBill = await rpc('create_trade_in_purchase_bill', { p_sale_id: saleC.sale_id, p_trade_in_id: tiC.id })
-  ok(typeof recoveryBill === 'string' && /^PUR-30-31-\d{4}$/.test(recoveryBill),
-    'recovery purchase bill created (two-digit-year format preserved)', recoveryBill)
+  ok(typeof recoveryBill === 'string' && /^PUR-2030-31-\d{4}$/.test(recoveryBill),
+    'recovery purchase bill created (canonical full-FY format, identical to create_purchase)', recoveryBill)
   const recoveryPurch = await sql`
     SELECT p.* FROM public.purchases p JOIN public.purchase_items pi ON pi.purchase_id = p.id
      WHERE pi.inventory_item_id = ${tiC.inventory_item_id} AND p.bill_number = ${recoveryBill}`.then((r) => r[0] as any)
@@ -523,12 +523,24 @@ async function main() {
   ok((await sql`SELECT status FROM public.inventory_items WHERE id = ${device5.id}`)[0].status === 'in_stock',
     'voiding does not touch inventory')
 
-  // Legacy free-text proformas remain readable (the two real PI-2026-27 rows).
+  // Legacy free-text proformas remain readable. The check is environment-
+  // independent: the suite seeds its own legacy-style line (in the suite FY,
+  // removed by the teardown) instead of relying on pre-existing rows — the
+  // old "two real PI-2026-27 rows" assumption went stale when the mandated
+  // fresh reset removed all historical business data.
+  const legacyPfSeed = await sql`
+    INSERT INTO public.proforma_invoices (bill_number, party_id, total, discount, trade_in_credit, final_total, date, financial_year_id, status)
+    VALUES ('PI-LEGACY-READABLE', ${party}, 150, 0, 0, 150, '2030-06-01', ${fy}, 'void')
+    RETURNING id`.then((r) => r[0].id as string)
+  await sql`
+    INSERT INTO public.proforma_invoice_items (proforma_invoice_id, description, qty, rate, discount, value)
+    VALUES (${legacyPfSeed}, 'Legacy free-text accessory line', 1, 150, 0, 150)`
   const legacy = await sql`
     SELECT i.id, i.description, i.qty, i.rate, i.value, i.inventory_item_id
       FROM public.proforma_invoice_items i
-     WHERE i.inventory_item_id IS NULL AND i.description IS NOT NULL LIMIT 2`
-  ok(legacy.length === 2, 'legacy free-text proforma lines remain readable (truthful, no fabricated refs)', legacy.length)
+     WHERE i.proforma_invoice_id = ${legacyPfSeed}`
+  ok(legacy.length === 1 && legacy[0].inventory_item_id === null && legacy[0].description !== null,
+    'legacy free-text proforma lines remain readable (truthful, no fabricated refs)', legacy)
 
   // ═══════════════════════════════════════════════════════════════════════
   console.log('── H. Proforma → Sale conversion (atomic, idempotent) ──')

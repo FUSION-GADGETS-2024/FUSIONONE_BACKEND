@@ -22,6 +22,7 @@ import { createServer } from './api/server.js';
 import { getSSEManager } from './api/sse.js';
 import { Watchdog } from './watchdog/Watchdog.js';
 import { warmupThumbnailWorker, stopThumbnailWorker } from './documents/thumbnail.js';
+import { stopImageWorker } from './party-documents/image-worker.js';
 import type { FastifyInstance } from 'fastify';
 
 export class Application {
@@ -205,6 +206,14 @@ export class Application {
       stopThumbnailWorker('app shutdown');
     } catch (err) {
       log.error({ err: err instanceof Error ? err.message : String(err) }, 'Error stopping thumbnail worker');
+    }
+
+    // In-flight image jobs reject — document uploads fail clearly, never
+    // hang a shutdown.
+    try {
+      stopImageWorker('app shutdown');
+    } catch (err) {
+      log.error({ err: err instanceof Error ? err.message : String(err) }, 'Error stopping image worker');
     }
 
     if (this.whatsappManager) {

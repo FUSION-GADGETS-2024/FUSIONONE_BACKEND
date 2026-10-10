@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/platform/supabase/client';
 import { useFinancialYear } from '@/components/providers/FinancialYearProvider';
-import { FileText, ExternalLink } from 'lucide-react';
+import { ExternalLink } from 'lucide-react';
 import { Link } from 'react-router';
 
 import { useSkeletonDelay } from '@/components/ui/Skeleton';
@@ -37,7 +37,7 @@ export default function ExchangePage() {
         // Device identity is resolved through the Inventory relationship
         // (the single authoritative source) — trade_ins holds only the
         // transactional facts.
-        const { data, error: tErr } = await supabase.from('trade_ins').select('id, sale_id, inventory_item_id, credit_value, mrp, document_url, sales!inner (id, bill_number, financial_year_id), inventory_items (id, status, brand, model, imei, ram_rom, color)').eq('sales.financial_year_id', selectedYear.id).order('id', { ascending: false });
+        const { data, error: tErr } = await supabase.from('trade_ins').select('id, sale_id, inventory_item_id, credit_value, mrp, sales!inner (id, bill_number, financial_year_id), inventory_items (id, status, brand, model, imei, ram_rom, color)').eq('sales.financial_year_id', selectedYear.id).order('id', { ascending: false });
         if (tErr) throw tErr;
         return (data || []).map((t: any) => ({
           ...t,
@@ -111,14 +111,6 @@ export default function ExchangePage() {
       header: 'Linked Sale',
       render: t => t.sales?.bill_number
         ? <Link to={`/sales/${t.sales.id}`} className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-800">{t.sales.bill_number}<ExternalLink className="h-3 w-3" /></Link>
-        : <span className="text-slate-300 text-xs">—</span>,
-      mobile: 'meta',
-    },
-    {
-      id: 'doc',
-      header: 'Doc',
-      render: t => t.document_url
-        ? <a href={t.document_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[10px] font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-md transition-colors"><FileText className="h-3 w-3" />View</a>
         : <span className="text-slate-300 text-xs">—</span>,
       mobile: 'meta',
     },

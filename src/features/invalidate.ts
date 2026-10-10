@@ -53,17 +53,25 @@ export function clearQueryCache(): void {
 
 /** Financial-year rows changed (create / close). */
 export function invalidateFinancialYears(): Promise<void> {
-  return invalidate([['financial-years'], ['store', 'current']])
+  return invalidate([
+    ['financial-years'],
+    ['store', 'current'],
+    // Closing an FY carries stock forward and changes notice conditions.
+    ['analytics'],
+    ['notices'],
+  ])
 }
 
 /** Banking setup changed (accounts CRUD, payment modes). */
 export function invalidateBanking(): Promise<void> {
-  return invalidate([['bank-accounts'], ['payment-modes']])
+  // Account/mode names surface in analytics payment breakdowns.
+  return invalidate([['bank-accounts'], ['payment-modes'], ['analytics']])
 }
 
 /** Party directory changed. */
 export function invalidateParties(): Promise<void> {
-  return invalidate([['parties'], ['party-detail']])
+  // Party names surface in analytics registers and notice messages.
+  return invalidate([['parties'], ['party-detail'], ['analytics'], ['notices']])
 }
 
 /** Inventory changed for a FY (add / edit / status changes). */
@@ -72,7 +80,9 @@ export function invalidateInventory(fyId?: string): Promise<void> {
     ['inventory-page', fyId].filter((k) => k !== undefined),
     // The ranked search cache (keys carry their own fyId — prefix only).
     ['inventory-search'],
-    ['dashboard'],
+    // The shared analytics fold (+ acquisition timeline) and derived notices.
+    ['analytics'],
+    ['notices'],
   ])
 }
 
@@ -87,7 +97,8 @@ export function invalidateSales(fyId?: string): Promise<void> {
     ['exchange-page', fyId].filter((k) => k !== undefined),
     ['accounts-page', fyId].filter((k) => k !== undefined),
     ['account-history'],
-    ['dashboard'],
+    ['analytics'],
+    ['notices'],
   ])
 }
 
@@ -101,7 +112,8 @@ export function invalidatePurchases(fyId?: string): Promise<void> {
     ['payments-page', fyId].filter((k) => k !== undefined),
     ['accounts-page', fyId].filter((k) => k !== undefined),
     ['account-history'],
-    ['dashboard'],
+    ['analytics'],
+    ['notices'],
   ])
 }
 
@@ -110,7 +122,8 @@ export function invalidateProformas(fyId?: string): Promise<void> {
   return invalidate([
     ['proformas-page', fyId].filter((k) => k !== undefined),
     ['proforma-detail'],
-    ['dashboard'],
+    ['analytics'],
+    ['notices'],
   ])
 }
 
@@ -119,7 +132,8 @@ export function invalidateAccountMoney(fyId?: string): Promise<void> {
   return invalidate([
     ['accounts-page', fyId].filter((k) => k !== undefined),
     ['account-history'],
-    ['dashboard'],
+    ['analytics'],
+    ['notices'],
     ['payments-page', fyId].filter((k) => k !== undefined),
   ])
 }
@@ -127,4 +141,11 @@ export function invalidateAccountMoney(fyId?: string): Promise<void> {
 /** WhatsApp message settings row changed. */
 export function invalidateWhatsAppState(): Promise<void> {
   return invalidate([['whatsapp-settings']])
+}
+
+/** A party's documents changed (upload via trade-in, replace, archive). */
+export function invalidatePartyDocuments(partyId?: string): Promise<void> {
+  return invalidate([
+    ['party-documents', partyId].filter((k) => k !== undefined),
+  ])
 }

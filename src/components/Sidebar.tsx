@@ -3,7 +3,7 @@ import { Link, useLocation } from 'react-router'
 import {
   Home, ShoppingCart, Package, Users, Wallet, FileText,
   RefreshCcw, Landmark, Calendar, Settings, Smartphone, LogOut,
-  ChevronUp, Store, UserCircle,
+  ChevronUp, Store, UserCircle, BarChart3,
 } from 'lucide-react'
 import { cn } from '@/components/ui/utils'
 import { useSession } from '@/components/providers/SessionProvider'
@@ -16,6 +16,7 @@ const navigation = [
   // Messages (/messages) lives in the HEADER next to the FY selector, not
   // here — it is a messaging view, not a primary ledger module.
   { name: 'Dashboard', href: '/home', icon: Home },
+  { name: 'Analytics', href: '/analytics', icon: BarChart3 },
   { name: 'Sales', href: '/sales', icon: ShoppingCart },
   { name: 'Purchases', href: '/purchases', icon: Package },
   { name: 'Inventory', href: '/inventory', icon: Smartphone },

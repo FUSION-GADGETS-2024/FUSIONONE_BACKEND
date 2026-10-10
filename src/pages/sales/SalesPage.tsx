@@ -11,7 +11,7 @@ import { ActionMenu } from '@/components/ui/ActionMenu';
 import type { ActionMenuItem } from '@/components/ui/ActionMenu';
 import { PaymentDialog } from '@/components/payments/PaymentDialog';
 import type { PaymentDialogInvoice } from '@/components/payments/PaymentDialog';
-import { Plus, FileDown, Share2, Printer, Ban, CheckCircle2, Wallet } from 'lucide-react';
+import { Plus, FileDown, Share2, MessageCircle, Printer, Ban, CheckCircle2, Wallet } from 'lucide-react';
 import { ViewButton } from '@/components/ui/ViewButton';
 import { useSkeletonDelay } from '@/components/ui/Skeleton';
 import { DataTable, TableSearchInput, RowActions, ListHeaderSkeleton } from '@/components/ui/tables';
@@ -61,21 +61,9 @@ export default function SalesPage() {
   }, [queryClient])
 
   // Direct row quick actions — one shared behavior layer for every list
+  // (savePdf / shareViaWhatsApp / share / print). They execute directly
+  // against the row's invoice and never route through the detail page.
   const quickActions = useInvoiceQuickActions();
-
-  // ⋮ actions execute directly against the row's invoice — they never route
-  // through the detail page.
-  const handleSavePdf = (sale: any) => {
-    void quickActions.savePdf({ invoiceId: sale.id, invoiceType: 'sale', billNumber: sale.bill_number });
-  };
-
-  const handleShare = (sale: any) => {
-    void quickActions.share({ invoiceId: sale.id, invoiceType: 'sale', billNumber: sale.bill_number });
-  };
-
-  const handlePrint = (sale: any) => {
-    void quickActions.print({ invoiceId: sale.id, invoiceType: 'sale', billNumber: sale.bill_number });
-  };
 
   const openCancelDialog = async (sale: any) => {
     try {
@@ -176,9 +164,10 @@ export default function SalesPage() {
           menuItems.push({ icon: Wallet, label: 'Receive Payment', onClick: () => openReceivePayment(s) });
         }
         menuItems.push(
-          { icon: FileDown, label: 'Save PDF', onClick: () => handleSavePdf(s) },
-          { icon: Share2, label: 'Share', onClick: () => handleShare(s) },
-          { icon: Printer, label: 'Print', onClick: () => handlePrint(s) },
+          { icon: FileDown, label: 'Save PDF', onClick: () => void quickActions.savePdf({ invoiceId: s.id, invoiceType: 'sale', billNumber: s.bill_number }) },
+          { icon: MessageCircle, label: 'Share via WhatsApp', onClick: () => void quickActions.shareViaWhatsApp({ invoiceId: s.id, invoiceType: 'sale', billNumber: s.bill_number }) },
+          { icon: Share2, label: 'Share', onClick: () => void quickActions.share({ invoiceId: s.id, invoiceType: 'sale', billNumber: s.bill_number }) },
+          { icon: Printer, label: 'Print', onClick: () => void quickActions.print({ invoiceId: s.id, invoiceType: 'sale', billNumber: s.bill_number }) },
         );
         if (!isReadOnly && !isCancelled) {
           menuItems.push({ icon: Ban, label: 'Cancel Invoice', tone: 'warning', onClick: () => openCancelDialog(s) });

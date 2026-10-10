@@ -9,6 +9,11 @@
  * level tab navigation (Payments, Settings …) renders the identical control
  * — one source of truth for the tab geometry, active state, and responsive
  * behavior (the track wraps naturally on narrow widths).
+ *
+ * The track ALWAYS sizes itself to its content (w-fit): page layouts place
+ * it in flex-column containers whose default cross-axis stretch would
+ * otherwise blow it up to full content width, turning the compact mode
+ * switch into a full-width toolbar. Pages never need to opt in or out.
  */
 import { cn } from '@/components/ui/utils';
 
@@ -35,7 +40,7 @@ export function SegmentedTabs<T extends string>({
 }: SegmentedTabsProps<T>) {
   return (
     <div
-      className={cn('inline-flex items-center rounded-lg bg-slate-100 p-0.5', className)}
+      className={cn('inline-flex w-fit items-center rounded-lg bg-slate-100 p-0.5', className)}
       role="tablist"
       aria-label={aria['aria-label']}
     >

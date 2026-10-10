@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "deploy:pages": "node scripts/deploy-pages.mjs"
   },
   "dependencies": {
     "@fontsource/roboto": "^5.2.5",
@@ -18,6 +19,8 @@
     "@supabase/supabase-js": "^2.112.3",
     "@tanstack/react-query": "^5.101.4",
     "clsx": "^2.1.1",
+    "exceljs": "^4.4.0",
+    "fflate": "^0.8.3",
     "lucide-react": "^1.31.0",
     "pdfjs-dist": "^6.3.289",
     "pdfkit": "^0.20.2",
@@ -30,6 +33,7 @@
     "@tailwindcss/vite": "^4.3.0",
     "@testing-library/dom": "^10.4.2",
     "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/node": "^25",
     "@types/pdfkit": "^0.17.6",
     "@types/react": "^19",

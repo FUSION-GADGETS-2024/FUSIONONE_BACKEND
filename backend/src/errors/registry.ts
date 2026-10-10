@@ -53,6 +53,18 @@ export const ErrorCode = {
   REMINDER_NOT_ELIGIBLE: 'REMINDER_NOT_ELIGIBLE',
   MESSAGE_JOB_CONFLICT: 'MESSAGE_JOB_CONFLICT',
 
+  // ── Party documents ──────────────────────────────────────────────────
+  DOCUMENTS_NOT_CONFIGURED: 'DOCUMENTS_NOT_CONFIGURED',
+  DOCUMENT_NOT_FOUND: 'DOCUMENT_NOT_FOUND',
+  PARTY_NOT_FOUND: 'PARTY_NOT_FOUND',
+  DOCUMENT_FILE_REQUIRED: 'DOCUMENT_FILE_REQUIRED',
+  DOCUMENT_FILE_TOO_LARGE: 'DOCUMENT_FILE_TOO_LARGE',
+  DOCUMENT_FILE_TYPE_UNSUPPORTED: 'DOCUMENT_FILE_TYPE_UNSUPPORTED',
+  DOCUMENT_FILE_INVALID: 'DOCUMENT_FILE_INVALID',
+  DOCUMENT_PROCESSING_FAILED: 'DOCUMENT_PROCESSING_FAILED',
+  DOCUMENT_STORAGE_UNAVAILABLE: 'DOCUMENT_STORAGE_UNAVAILABLE',
+  DOCUMENT_STORAGE_CORRUPTED: 'DOCUMENT_STORAGE_CORRUPTED',
+
   // ── Security ─────────────────────────────────────────────────────────
   SECURITY_POLICY_VIOLATION: 'SECURITY_POLICY_VIOLATION',
   SECURITY_IDENTITY_MISMATCH: 'SECURITY_IDENTITY_MISMATCH',
@@ -111,6 +123,17 @@ export const ERROR_HTTP_STATUS: Readonly<Record<ErrorCodeValue, number>> = Objec
   REMINDER_NOT_ELIGIBLE: 409,
   MESSAGE_JOB_CONFLICT: 409,
 
+  DOCUMENTS_NOT_CONFIGURED: 503,
+  DOCUMENT_NOT_FOUND: 404,
+  PARTY_NOT_FOUND: 404,
+  DOCUMENT_FILE_REQUIRED: 400,
+  DOCUMENT_FILE_TOO_LARGE: 413,
+  DOCUMENT_FILE_TYPE_UNSUPPORTED: 415,
+  DOCUMENT_FILE_INVALID: 422,
+  DOCUMENT_PROCESSING_FAILED: 422,
+  DOCUMENT_STORAGE_UNAVAILABLE: 502,
+  DOCUMENT_STORAGE_CORRUPTED: 500,
+
   SECURITY_POLICY_VIOLATION: 403,
   SECURITY_IDENTITY_MISMATCH: 403,
   SECURITY_SESSION_CORRUPTED: 500,
@@ -165,6 +188,17 @@ export const ERROR_DEFAULT_MESSAGE: Readonly<Record<ErrorCodeValue, string>> = O
   PAYMENT_DIRECTION_INVALID: 'The payment direction is invalid. Allowed: in, out.',
   REMINDER_NOT_ELIGIBLE: 'This invoice is not eligible for a payment reminder (fully paid or cancelled).',
   MESSAGE_JOB_CONFLICT: 'A message for this document is already being sent.',
+
+  DOCUMENTS_NOT_CONFIGURED: 'Document storage is not configured on this server.',
+  DOCUMENT_NOT_FOUND: 'The requested document was not found.',
+  PARTY_NOT_FOUND: 'The requested party was not found.',
+  DOCUMENT_FILE_REQUIRED: 'A document file is required.',
+  DOCUMENT_FILE_TOO_LARGE: 'The document file exceeds the maximum allowed size.',
+  DOCUMENT_FILE_TYPE_UNSUPPORTED: 'This file type is not supported. Use a JPEG, PNG, WebP or PDF document.',
+  DOCUMENT_FILE_INVALID: 'The document file is invalid or corrupted.',
+  DOCUMENT_PROCESSING_FAILED: 'The document could not be processed.',
+  DOCUMENT_STORAGE_UNAVAILABLE: 'Document storage is temporarily unavailable. Please try again.',
+  DOCUMENT_STORAGE_CORRUPTED: 'The stored document failed its integrity check.',
 
   SECURITY_POLICY_VIOLATION: 'A security policy violation was detected.',
   SECURITY_IDENTITY_MISMATCH: 'The connected WhatsApp identity does not match the expected identity.',

@@ -187,3 +187,21 @@ what each historical file did.
                              #   values fixed by controlled migration; TEST:
                              #   ten invalid fixture IMEIs replaced with valid
                              #   ones). Nothing is grandfathered anymore.
+  0014_payment_amount_invariant.sql
+                             # Payment amount invariant at the RPC trust
+                             #   boundary: receive_payment / pay_purchase
+                             #   reject NULL / zero / negative amounts BEFORE
+                             #   any row is locked or written (rejected calls
+                             #   are side-effect free); upper bound and
+                             #   accounting semantics unchanged. Brings the
+                             #   migration chain to the verified live-TEST
+                             #   bodies.
+  0015_canonical_recovery_numbering.sql
+                             # Recovery bills use the ONE canonical purchase
+                             #   numbering: create_trade_in_purchase_bill
+                             #   allocates PUR-<full start year>-<2-digit end
+                             #   year>-<counter> via the same
+                             #   fy_start_year_full/fy_end_year_2 helpers as
+                             #   create_purchase (PUR-2026-27-0006), replacing
+                             #   the historical two-digit start-year quirk
+                             #   (PUR-26-27-0006). Historical bills untouched.

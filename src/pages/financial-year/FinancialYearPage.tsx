@@ -22,6 +22,10 @@ export default function FinancialYearPage() {
   const { error, success } = useToast();
   const [isLoading, setIsLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  // Close confirmation — the app's modal pattern (never native confirm()).
+  // Presentation only: confirming runs the exact same close logic that ran
+  // behind the old confirm(); Cancel leaves everything untouched.
+  const [closeTarget, setCloseTarget] = useState<FinancialYear | null>(null);
   const { data: storeData } = useStore();
   const { isOwner } = useSession();
   const activeSystemYearId = storeData?.active_financial_year_id ?? null;
@@ -59,15 +63,20 @@ export default function FinancialYearPage() {
     success('Switched', 'Working financial year changed');
   };
 
-  const handleClose = async (fy: FinancialYear) => {
+  const handleClose = (fy: FinancialYear) => {
     if (fy.status === 'closed') return;
-    if (!confirm(`Close FY ${fy.start_date} → ${fy.end_date}? This will freeze all records and carry forward unsold stock. Cannot be reversed.`)) return;
+    setCloseTarget(fy);
+  };
+
+  const handleConfirmClose = async () => {
+    if (!closeTarget) return;
     setIsLoading(true);
     try {
       // One transactional RPC: close + next-FY find-or-create + stock
       // carry-forward (copy semantics) + idempotent opening balances.
-      const result = await closeFinancialYear(fy);
+      const result = await closeFinancialYear(closeTarget);
       success('Success', `Year closed. ${result.items_carried} items carried forward. ${result.accounts_carried} account balance(s) carried forward.`); await refresh();
+      setCloseTarget(null);
     } catch (err: any) { error('Error', err.message); } finally { setIsLoading(false); }
   };
 
@@ -188,6 +197,37 @@ export default function FinancialYearPage() {
             <p role="alert" className="text-[10px] font-medium text-rose-600">End date must be after the start date.</p>
           )}</div>
         </div>
+      </Modal>
+
+      {/* Close confirmation — same facts the close RPC acts on (freeze,
+          carry-forward, next-FY find-or-create, irreversibility), stated
+          with values already in hand. No FY calculations are duplicated. */}
+      <Modal
+        isOpen={!!closeTarget}
+        onClose={() => !isLoading && setCloseTarget(null)}
+        hideClose
+        title="Close Financial Year"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setCloseTarget(null)} disabled={isLoading}>Cancel</Button>
+            <Button variant="danger" onClick={handleConfirmClose} isLoading={isLoading}>Close Financial Year</Button>
+          </>
+        }
+      >
+        {closeTarget && (
+          <div className="space-y-3">
+            <p className="text-sm font-medium text-slate-900">
+              Close FY {closeTarget.start_date} → {closeTarget.end_date}?
+            </p>
+            <ul className="space-y-1.5 text-xs text-slate-600">
+              <li>All records in this financial year will become read-only.</li>
+              <li>Unsold stock will carry forward to the next financial year.</li>
+              <li>Account balances will carry forward as opening balances.</li>
+              <li>A new financial year will be created if one doesn&apos;t already exist.</li>
+            </ul>
+            <p className="text-xs font-medium text-rose-600">This action cannot be reversed.</p>
+          </div>
+        )}
       </Modal>
     </div>
   );

@@ -354,3 +354,426 @@ Identical to the invoice-sending path above — there is exactly ONE delivery pi
 - **Database:** read-only SQL against pg_catalog + business data on the live project (extensions, schemas, tables, columns, constraints, indexes, functions incl. bodies, triggers, RLS/policies, grants, column privileges, buckets/objects, auth.users/public.users, store, whatsapp_settings, payments/ledger reconciliation, FY counters, realtime publication, schema_migrations). Migration-vs-live drift table: all MATCH except one benign platform-injected object.
 - **Infrastructure:** /start.sh, .zscripts/{dev.sh,start.sh}, Caddyfile (+ platform /app/Caddyfile behavior), running processes, port map, env files (key names), mini-services (empty).
 - **Could NOT be verified:** hosted backend deployment/version (no manifest, external service); whether an external cron pings `/ping` in production; Supabase dashboard-level Auth config (SMTP, redirect allow-lists, applied email templates); Edge Function deployment state (nothing in repos, not SQL-visible); runtime behavior of the hosted instance (all live-DB facts are catalog/data facts).
+
+---
+
+---
+
+# DOCUMENTS / FILE STORAGE — CURRENT STATE
+
+> **STATUS: SUPERSEDED HISTORICAL SNAPSHOT (2026-10-07, commit `b38b466`).**
+> This was the read-only pre-implementation audit of the legacy trade-in document
+> system (public-URL string on `trade_ins.document_url`). **The architecture it
+> describes was REPLACED later the same day by the Party Documents refactor —
+> see the "DOCUMENTS / FILE STORAGE — CURRENT STATE (PARTY DOCUMENTS
+> ARCHITECTURE)" section at the end of this document, which is the authoritative
+> current state.** This snapshot is preserved for the migration history only.
+> Method at audit time: direct inspection of frontend + backend + migrations
+> source, live TEST Supabase project `egdrnhtmclvhsfjvhyam` (read-only SQL via
+> `database/tools/audit-documents.ts`), and `worklog.md` history. Production
+> (`jzdnesudczqksghosmmx`) was NOT accessed.
+
+## A. Current frontend flow (Trade-In document upload)
+
+**Entry points — exactly two, both trade-in forms:**
+
+1. `src/pages/sales/NewSalePage.tsx` — "Trade In Modal" (`Modal`, lines ~576–638). Field label **"Identity / Declaration Doc (Optional)"**, a native `<input type="file" accept="image/*,.pdf">` (lines 621–634) inside a dashed drop-zone style box. The chosen `File` is kept in the page's `tradeInForm` React state (`file` key).
+2. `src/components/proformas/ConvertProformaDialog.tsx` — same label + same `accept` (lines 458–467), file kept in the dialog's per-device trade-in row state via `updateTradeIn(ti.id, { file: e.target.files[0] })`.
+
+**State/model:** `CreateTradeIn.file?: File | null` (`src/features/sales/mutations.ts:28`) — a raw browser `File` object in component state only. Nothing is persisted before submit; navigating away loses it.
+
+**Validation:** NONE. `accept="image/*,.pdf"` is a file-picker hint only — there is no client-side JS check of MIME type or size, and the trade-in field validator `validateTradeInDeviceFields` (`src/features/validation/fields.ts`) has no file field at all. The upload function performs no validation either.
+
+**Upload (browser-direct, no backend):** on submit, `buildTradeInPayload` (`src/features/sales/mutations.ts:72–87`) loops over trade-ins and calls `uploadTradeInDocument(ti.file)` for each device with a file **BEFORE** the `supabase.rpc('create_sale')` call. Both sale paths use it: `createSale` (normal mode) and `convertProforma` (proforma-conversion mode).
+
+**Upload implementation** (`src/features/sales/mutations.ts:53–70`):
+- Generated storage filename: `trade_in_${Date.now()}.${ext}` where `ext = file.name.split('.').pop()` — the user's original filename is discarded; no UUID; same-second collisions are theoretically possible.
+- Bucket: **`documents`**; object path: **`trade_ins/<fileName>`**.
+- APIs used (exactly two): `supabase.storage.from('documents').upload('trade_ins/<name>', file)` then `supabase.storage.from('documents').getPublicUrl('trade_ins/<name>')`.
+- Client: the single browser Supabase client singleton (`src/platform/supabase/client.ts`, `createBrowserClient` from `@supabase/ssr` 0.12.4, publishable key + cookie session, `supabase-js` 2.112.3). Upload is **browser → Supabase Storage REST directly**; the Fastify backend is never involved.
+- Returns the **full public URL** (e.g. `https://egdrnhtmclvhsfjvhyam.supabase.co/storage/v1/object/public/documents/trade_ins/trade_in_<timestamp>.<ext>`) — not a signed URL, not an object path.
+
+**Database write:** the URL is placed in the `trade_ins` array of the `create_sale` RPC payload (`document_url` key), inserted by the RPC into `public.trade_ins.document_url` as `NULLIF(v_ti->>'document_url','')::text` (`database/migrations/0011_canonical_sale_proforma_rpcs.sql:398–405`). The RPC performs no validation on it (any string is accepted).
+
+**Failure semantics:**
+- Upload fails → non-fatal: the catch logs `console.warn('Storage error')` and the sale proceeds with `document_url: null` (explicitly documented as "preserved reference behavior" in the code comment).
+- Upload succeeds but `create_sale` fails → **the object is already in the bucket with no referencing `trade_ins` row: an orphaned object.** No compensation/cleanup code exists anywhere (grep-verified: no `.remove()`, `.update()`, `.list()`, or `createSignedUrl` call on storage in `src/` or `backend/src/`). Retrying the sale after an RPC failure re-uploads the same file under a new timestamp — duplicate objects are possible.
+
+## B. Current database model
+
+- **The only document-related column in the entire `public` schema: `public.trade_ins.document_url TEXT` (nullable)** (verified live via `information_schema`). Defined in `database/migrations/0002_schema.sql:187`, retained unchanged through the 0010 trade-in redesign.
+- `public.trade_ins` today (0002 + 0010): `id UUID PK`, `sale_id UUID NOT NULL → sales(id) ON DELETE CASCADE`, `inventory_item_id UUID NOT NULL → inventory_items(id)`, `credit_value NUMERIC(12,2) NOT NULL`, `mrp NUMERIC(12,2)`, `document_url TEXT`. Indexes: `idx_trade_ins_sale`, `idx_trade_ins_inventory`.
+- **The document belongs technically to the trade-in transaction row** (`trade_ins`), not to parties, sales, or inventory. It is a single nullable URL string — one document max per trade-in device.
+- `public.parties`: `id, name, number, address, created_at` — **no document columns, no reusable party documents, no multi-document support of any kind.**
+- **No document table/entity exists.** Live TEST `public` tables (24): account_fund_entries, account_transactions, account_transfers, bank_accounts, financial_years, inventory_items, message_jobs, parties, payment_modes, payments_in, payments_out, proforma_invoice_items, proforma_invoices, proforma_trade_ins, purchase_items, purchases, reminder_settings, sale_items, sales, schema_migrations, store, trade_ins, users, whatsapp_settings. No document metadata anywhere (no type, size, checksum, uploader, created_at for documents).
+- `proforma_trade_ins` (proposed trade-ins) has NO document field — documents only exist at actual receipt (conversion).
+- **RPCs touching `document_url`:** `create_sale` (0011, inserts it verbatim), `cancel_sale` (0011:483–523, returns it inside the `resold[]` JSON payload for already-resold devices). `create_trade_in_purchase_bill` (0011:992–1041) does **NOT** propagate the document — the recovery purchase has no document reference, and `purchases` has no document column.
+- **Triggers:** none involving documents (`freeze_sold_item_identity` from 0010 does not touch `document_url`). Historical trade-ins retain their original `document_url` — no code path mutates it after creation; only row deletion (cancel/delete sale paths) removes the reference (the bucket object is never deleted).
+- **RLS:** `trade_ins` has the single shared policy `app_user_access` FOR ALL TO authenticated `USING/WITH CHECK (private.can_access_app())` (0004; live-verified). `private.can_access_app()`/`private.is_owner()` are `SECURITY DEFINER, SET search_path=''` functions in `database/migrations/0003_functions_triggers.sql:32–66`.
+- **Document-relevant migrations:** 0002 (table + column), 0003 (original `create_sale` writes it), 0004 (documents bucket + storage policies), 0010 (trade_ins redesign, column kept), 0011 (canonical `create_sale`/`cancel_sale`).
+- Live TEST also verified: **no `pdf_path`/`pdf_generated_at`/`pdf_template_version` drift columns exist** in TEST (the historical production-only drift was deliberately never recreated).
+
+## C. Current Supabase Storage model
+
+- **Two buckets** (created in `0004_security_storage.sql:184–190`, live-verified in `storage.buckets`): `documents` and `store_assets` — **both `public = true`**, both with `file_size_limit = NULL` and `allowed_mime_types = NULL` (no storage-layer size or MIME constraints).
+- `documents` is used only for trade-in documents (path prefix `trade_ins/`). `store_assets` is used only for the store logo/signature (`store.logo_url`, `store.signature_url`; uploaders at `src/pages/auth/SetupStorePage.tsx:114–123` and `src/pages/settings/SettingsPage.tsx:107–120`, path pattern `<user.id>_logo_<ts>.<ext>` / `<user.id>_signature_<ts>.<ext>`, also public URLs).
+- **Live storage policies (match migration 0004 exactly):** `documents_read` (SELECT), `documents_write` (INSERT), `documents_update`, `documents_delete` — all `TO authenticated` gated on `bucket_id = 'documents' AND private.can_access_app()`; `store_assets_*` equivalents gated `read → can_access_app()`, writes `→ is_owner()`.
+- Because both buckets are **public-read at the CDN level**, every object is fetchable **without any authentication** at `…/storage/v1/object/public/<bucket>/<path>` — the RLS policies only govern Storage-API operations (list/manage/upload), not public object reads. No signed URLs are used anywhere.
+- The application never issues storage UPDATE/DELETE/LIST calls — objects are write-once from the browser and never managed afterwards.
+
+## D. Current Party Detail state
+
+- Page: `src/pages/parties/PartyDetailPage.tsx`, route `/parties/:id` (`src/components/router.tsx`).
+- Data sources: `usePartyDetail(id)`, `usePartiesLedger`, `usePartyInvoices` from `src/features/parties/api.ts`.
+- **No document-related UI of any kind:** no viewing, no upload, no download, no delete/archive. The page is a profile block + FY ledger summary + Sales/Purchases invoice tabs. Party documents do not exist in the data model (see B).
+
+## E. Current preview/download behavior
+
+- **The single access surface for trade-in documents:** the Exchange page (`/exchange`, `src/pages/exchange/ExchangePage.tsx:117–124`). The "Doc" column renders a "View" pill: `<a href={t.document_url} target="_blank" rel="noopener noreferrer">` with a `FileText` icon — the browser opens the raw **public Supabase Storage URL in a new tab**. That is the entire preview AND download story (browser-native rendering; images and PDFs behave identically — whatever the browser does with the content type).
+- **No preview component, no download action, no endpoint wrapper, no signed URLs, no expiry** (public URLs are permanent), **no decryption, no thumbnails/optimization** for stored documents.
+- `SaleDetailPage` fetches `document_url` (via `fetchSaleDetail`, `src/features/sales/api.ts:113–118`) but **never renders it** — trade-ins appear only as device rows/counts in cancel/delete dialogs and the invoice view-model.
+- Separately (different domain): GENERATED invoice PDFs have a full client-side preview/download/print stack (`src/features/invoice/` — `renderers/pdfkit.ts` PDFKit renderer, `InvoicePdfViewer` with `pdfjs-dist`, `download.ts` blob + anchor download, `pdf-cache.ts` content-hash IDB cache). This machinery is for generated invoice PDFs only and has no interaction with stored trade-in documents.
+
+## F. Current file validation/processing capabilities
+
+| Capability | Present? | Where/what |
+|---|---|---|
+| Multipart parsing | **No** | No `@fastify/multipart` (backend deps: `@fastify/cors` only); frontend uploads are browser-direct supabase-js REST |
+| Streaming uploads | **No** | Plain supabase-js `.upload()` |
+| Image processing / compression / resizing | **No** (for files) | `@napi-rs/canvas` 0.1.68 exists in backend but ONLY inside the WhatsApp thumbnail worker (`backend/src/documents/thumbnail.ts`) which renders a JPEG preview from document DATA, never from uploaded files |
+| PDF processing | Generation only | `pdfkit` 0.20.2 (frontend invoice renderer + backend message documents); `pdfjs-dist` 6.3.289 (frontend invoice viewer). No parsing/merging of stored files |
+| Thumbnail generation | **No** (for files) | Thumbnail worker is WhatsApp-message-only |
+| MIME/content sniffing | **No** | Only the HTML `accept` picker hint |
+| Checksum/hash calculation | **No** (for files) | `pdf-cache.ts` hashes invoice DATA for cache keys, not files |
+| Encryption libraries | Session-only | `WHATSAPP_BACKUP_ENCRYPTION_KEY` (Redis WhatsApp-session backup), `jose` 5.9.6 (JWT). No file-at-rest encryption anywhere |
+
+## G. Current backend capabilities
+
+- **Framework:** Fastify **5.2.1** (`backend/package.json`), run under **Bun** (`bun --hot src/index.ts`) with one plain-Node child process for the canvas thumbnail worker. CORS via `@fastify/cors` 11.3.0.
+- **Routes (complete list, `backend/src/api/server.ts`):** `/`, `/health/live`, `/health/ready`, `/ping`, `/api/status`, `/api/events` (SSE), `/api/whatsapp/login`, `/api/whatsapp/cancelPairing`, `/api/whatsapp/logout`, `/api/messages/sendInvoice`, `/api/messages/autoSend`, `/api/messages/sendReceipt`, `/api/messages/sendStatement`, `/api/messages/sendReminder`, `PUT /api/messages/reminder-settings/:saleId`, plus auth/users/user-management routes. **All JSON — there is no file/multipart route and no file-handling code of any kind.**
+- **Request size limit:** Fastify `bodyLimit: cfg.maxRequestBodyBytes` — `MAX_REQUEST_BODY_BYTES`, default **10485760 (10 MB)** (`backend/src/config/index.ts:114`, `backend/src/api/server.ts:74`).
+- **Auth middleware:** every `/api/*` route requires a Bearer Supabase user JWT, cryptographically verified against Supabase JWKS via `jose` (`backend/src/api/auth.ts`/`authorize.ts`); strict zod request schemas; closed `AppError` registry (`backend/src/errors/registry.ts`).
+- **Architecture pattern:** domain modules (`documents/`, `messages/`, `whatsapp/`, `session/`, `security/`, `supabase/`); `backend/src/documents/repository.ts` is the established Supabase-loader pattern running under the **caller's JWT + RLS** (or the system context for background jobs). The backend `documents/` folder is the PDF-message composition pipeline (invoice/receipt/statement builders + PDFKit renderer + thumbnail worker) — it contains **no file-storage code and never touches `document_url`** (grep-verified: zero `document_url` references in `backend/src/`).
+- **Storage abstractions:** none. The backend never calls Supabase Storage.
+- **Streaming capabilities:** none on the HTTP surface (all request/response bodies are buffered JSON; PDFs are generated in memory).
+- Fact (not a design): the existing route + zod + AppError + domain-module pattern in `backend/src/api/server.ts` / `backend/src/documents/` is the only established backend structure a future document module could register into; no multipart capability exists today and would be new build.
+
+## H. Current R2 / Cloudflare state
+
+- **R2 is NOT used anywhere.** No R2/S3 client package in any `package.json` (root, `backend/`, `database/tools/`); no `r2_buckets` binding; no R2/S3/Cloudflare-storage env vars in any env file (root `.env.local`: `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`, `VITE_FUSIONONE_BACKEND_BASE`; `backend/.env`: 15 keys — PORT/HOST/NODE_ENV/LOG_LEVEL/SUPABASE_URL/SUPABASE_PUBLISHABLE_KEY/SUPABASE_SECRET_KEY/APP_BASE_URL/CLIENT_ORIGIN/PING_TOKEN/MAX_REQUEST_BODY_BYTES/WHATSAPP_* (5)/REDIS_URL; `database/tools/.env`: `TEST_SUPABASE_URL`, `TEST_SUPABASE_SECRET_KEY`, `TEST_SUPABASE_DB_URL`).
+- The only Cloudflare artifact is `wrangler.jsonc` — a **Cloudflare Pages** deployment config for the static SPA (`name: "fusionone"`, `pages_build_output_dir: "dist"`, browser-safe `vars` mirroring TEST Supabase). It mentions a `scripts/deploy-pages.mjs` bridge and `npm run deploy:pages` — **neither exists in the repo** (no `scripts/` directory, no deploy script in `package.json`). No storage bindings of any kind.
+
+## I. Current authorization/security model
+
+- **Database tables (trade-ins, parties, all business tables):** one shared policy `app_user_access` FOR ALL to `authenticated` gated by `private.can_access_app()` (verified + active owner/user). No per-user data isolation — single-store shared dataset by design.
+- **Storage objects (`documents` bucket):** any authenticated app user can INSERT/UPDATE/DELETE/SELECT objects via the Storage API (policies in C). Nothing records who uploaded an object; there is no per-object ownership.
+- **Read confidentiality of trade-in documents = URL secrecy only:** the bucket is public-read at the CDN, so anyone with the URL (no auth) can fetch the object. No signed URLs, no expiry, no revocation, no per-object ACL.
+- **Application checks:** none specific to documents — the upload happens inside the sale form, guarded only by the app session; the display link is rendered to any app user viewing the Exchange page.
+- **Backend authorization pattern** (for reference): caller-JWT + RLS for business reads, service-role only for system-level jobs — currently has no document surface at all.
+
+## J. Existing document data (TEST database, read-only)
+
+- `public.trade_ins`: **3 rows total, 0 with `document_url`, 0 empty-string values.**
+- `documents` bucket: **0 objects.** `store_assets`: **0 objects.** No other buckets. `store.logo_url`/`store.signature_url` are both NULL in TEST.
+- Orphaned objects: 0. Dangling references: 0. Duplicate-upload evidence: none (no data exists).
+- Migration suitability: there is **no document data in TEST to migrate**. Production was NOT accessed; the original 2026-10-03 audit noted the `documents` bucket was then absent in production and live-only `pdf_path` columns existed — current production document state is UNKNOWN and out of scope.
+
+## K. Existing tests
+
+- **Frontend (vitest, 18 files in `src/test/`):** NO test covers `uploadTradeInDocument`, the file inputs, the Exchange "View" link, or any document behavior. `business.test.ts`/`fields.test.ts` cover trade-in field validation — which has no file field.
+- **Backend (bun test: `documents.test.ts`, `statement.test.ts`, `templates.test.ts`):** PDF-message pipeline and templates only — nothing about trade-in document storage.
+- **DB suites (`database/tools/`):** `tradein-proforma-tests.ts` passes `document_url: null` in `create_sale` payloads (RPC acceptance only); `validation-search-tests.ts` passes `document_url: ''` (the `NULLIF` path). No storage/upload/retrieval tests.
+- **E2E (worklog evidence):** trade-in device flows were browser-verified repeatedly, but there is **no evidence any E2E ever attached a document file** — the only file-upload E2E in history is the store logo during onboarding/setup (store_assets). The trade-in document upload path is effectively **untested end-to-end**.
+- **Explicitly untested:** upload itself, upload-failure fallback, orphan/duplicate behavior, public-URL access, MIME/size behavior (unconstrained), preview/download.
+
+## L. Known limitations directly relevant to the planned migration
+
+1. A document is a bare public-URL string on `trade_ins` — no document entity, no metadata (kind/size/checksum/uploader/timestamp), no party association, no archive state.
+2. Upload is browser-direct with **no type/size validation at any layer** (client, bucket, RPC).
+3. Upload-before-RPC with no compensation → **orphaned objects on failed saves; duplicate objects on retries.**
+4. **Public bucket + permanent URLs:** confidentiality is URL secrecy; no signed URLs/expiry/revocation.
+5. **No party documents exist** (schema + UI), yet the planned model centralizes documents on Party Detail — that is greenfield.
+6. Exactly one display surface (Exchange "View") and zero management surfaces (no replace/archive/delete anywhere).
+7. One document max per trade-in (single nullable column); recovery purchase bills drop the reference entirely.
+8. The backend has **no multipart, no storage client, no file routes** — any backend-mediated document flow is new build; the only existing upload path is the browser client.
+9. `update_sale` cannot change a trade-in document (no post-creation document edit path; `EditSalePage` has no file handling).
+10. TEST holds zero document data; any migration exercise must come from production (uninspected) or start empty.
+
+## M. Open questions that cannot be determined from the codebase
+
+1. **Production document state** — bucket existence, `document_url` population, object counts (production is off-limits per constraints; historical note says the bucket was absent there on 2026-10-03).
+2. The **Supabase platform-enforced default file size limit** actually applied to buckets with `file_size_limit = NULL` (not verifiable from the repo; commonly 50 MB platform default).
+3. **Supabase CDN caching/retention** behavior for public objects (platform-level).
+4. Whether the **hosted production backend** (`backend-fusionone.fusiongadgets.in`) matches the repo (no deployment manifest — pre-existing known unknown).
+5. Whether any **external process** writes document-adjacent columns in production (the historical `pdf_path` drift writer was never identified).
+6. **Cloudflare account-level capabilities** (R2 availability, the missing `scripts/deploy-pages.mjs` deploy bridge) — account state is not in the repo.
+
+## Verification Appendix (this section)
+
+- **Frontend:** all document-related code paths read in full (`src/features/sales/mutations.ts`, `src/pages/sales/NewSalePage.tsx` trade-in modal, `src/components/proformas/ConvertProformaDialog.tsx`, `src/pages/exchange/ExchangePage.tsx`, `src/pages/parties/PartyDetailPage.tsx`, `src/features/sales/api.ts`, `src/features/invoice/download.ts`); grep-verified negatives: no other `storage.from('documents')` caller, no storage remove/update/list/signed calls, no file validation anywhere.
+- **Backend:** `backend/package.json`, `backend/src/app.ts`, `backend/src/api/server.ts` route list, `backend/src/config/index.ts`, `backend/src/documents/{thumbnail,repository}.ts`, `backend/API.md`; grep-verified negative: zero `document_url` references in `backend/src/`.
+- **Database:** migrations 0002/0003/0004/0010/0011 read in full for document paths; live TEST read-only SQL (`database/tools/audit-documents.ts`): trade_ins population, buckets, objects, orphan/dangling analysis (both directions), live storage + trade_ins policies, full public-table inventory, document-ish column sweep, `pdf_*` column sweep.
+- **Infrastructure/config:** `wrangler.jsonc`, `.env.example`, env KEY NAMES of `.env.local` / `backend/.env` / `database/tools/.env`, `src/platform/supabase/client.ts`, route table in `src/components/router.tsx`, `worklog.md` E2E history.
+- **Could NOT be verified:** production document state (not accessed); Supabase platform defaults/CDN behavior; hosted backend version parity; Cloudflare account state.
+
+---
+
+---
+
+# DOCUMENTS / FILE STORAGE — CURRENT STATE (PARTY DOCUMENTS ARCHITECTURE)
+
+> **STATUS: AUTHORITATIVE CURRENT STATE (2026-10-07, post-migrations 0016 + 0017 + 0018).**
+> The final model: **documents belong exclusively to Parties.** The legacy trade-in
+> document system (browser-direct Supabase Storage upload + public URL string on
+> `trade_ins.document_url`, audited in the superseded snapshot above) was replaced by
+> the Party Documents architecture (0016), the legacy Supabase bucket was removed
+> (0017), and the interim `trade_ins.document_id` relationship was fully removed
+> (0018) — trade-ins, sales, proformas, exchanges and invoices carry **no document
+> concept at all**. Storage is a **private Cloudflare R2 bucket** behind the Fastify
+> backend, with application-level AES-256-GCM envelope encryption. All of this is
+> live on the **TEST** Supabase project `egdrnhtmclvhsfjvhyam` + TEST R2 bucket only —
+> production (`jzdnesudczqksghosmmx`) was never accessed; production promotion is a
+> separate, explicitly authorized later operation.
+
+```text
+PARTY
+  └── party_documents
+        ├── Add (incl. the optional initial document on Add Party)
+        ├── Preview (in-app dialog — never a new tab)
+        ├── Download
+        ├── Replace (ONLY here: Party Detail → Documents)
+        └── Archive
+
+TRADE-IN / PROFORMA TRADE-IN / SALE / EXCHANGE / INVOICE
+  └── no document relationship
+```
+
+## A. Domain model
+
+- **`public.party_documents`** (migration `0016_party_documents.sql`) — the ONE
+  document entity: `id UUID PK`, `party_id UUID NOT NULL → parties(id) ON DELETE
+  CASCADE`, `file_name` (original user filename, metadata only), `mime_type` (the
+  ACTUAL sniffed type of the stored file), `file_size BIGINT` (stored plaintext
+  size), `checksum_sha256` (plaintext SHA-256, re-verified on every retrieval),
+  `storage_key TEXT NOT NULL UNIQUE`, envelope-encryption material
+  (`encryption_alg` = 'AES-256-GCM', `key_version` INT (rotation-ready, currently 1),
+  `encrypted_dek`/`dek_iv`/`dek_tag` (wrapped per-document DEK), `file_iv`/`file_tag`),
+  lifecycle `status` ∈ {active, archived} + `created_at`/`archived_at`. Index:
+  `idx_party_documents_party`. RLS: shared `app_user_access` policy via
+  `private.can_access_app()` (same model as every business table).
+- **`trade_ins` has NO document relationship** (migration
+  `0018_remove_trade_in_document.sql` dropped the interim `document_id` column,
+  its FK and its index; `document_url` was already dropped by 0017). No table
+  other than `party_documents` references documents at all.
+- **RPCs are document-free:** `create_sale` takes only device/transaction facts
+  per trade-in (brand/model/IMEI/RAM-ROM/color/credit/MRP) — a `document_id` key
+  in the payload is simply ignored; `cancel_sale`'s `resold[]` carries device
+  identity + transaction fields only.
+- **Supabase Storage:** the legacy public `documents` bucket + its four
+  `documents_*` storage policies were REMOVED from TEST (0017; bucket via the
+  Storage API — Supabase's `protect_delete` trigger forbids SQL bucket drops).
+  Only `store_assets` remains (logo/signature — deliberately untouched, still
+  browser-direct + public URL).
+
+## B. Backend (`backend/src/party-documents/` — Fastify domain module, UNCHANGED by the 0018 refactor)
+
+**Routes (registered in `api/server.ts`, all party-scoped; there is NO
+`/api/documents` surface of any kind):**
+
+- `GET  /api/parties/:partyId/documents` — list (newest first)
+- `POST /api/parties/:partyId/documents` — upload (multipart `file` part)
+- `GET  /api/parties/:partyId/documents/:documentId/preview` — inline stream
+- `GET  /api/parties/:partyId/documents/:documentId/download` — attachment stream
+- `POST /api/parties/:partyId/documents/:documentId/replace` — multipart
+- `POST /api/parties/:partyId/documents/:documentId/archive`
+
+Every request re-verifies `document.party_id === :partyId` (party-scoped
+resolution — a wrong-party document id is simply NOT_FOUND). Auth: the standard
+Bearer Supabase JWT + JWKS verification; business reads run under the **caller's
+JWT + RLS** (`getUserClient`). UUID params validated. Disposition filenames are
+RFC 6266/5987 escaped; responses carry `X-Content-Type-Options: nosniff` +
+`Cache-Control: private, no-store`.
+
+**Upload pipeline** (`service.ts`, single orchestration layer):
+multipart read (size enforced **while streaming**, never after buffering) →
+content-sniffing validation (`validate.ts`: JPEG `FF D8 FF`, PNG, WebP (RIFF…WEBP),
+PDF `%PDF-` + structural checks — never the browser's hints) → processing:
+images are decoded → EXIF-oriented → capped at 2560 px longest side (never
+upscaled) → re-encoded JPEG quality 85 (re-encode strips ALL metadata);
+PDFs are preserved byte-for-byte (never rasterized) → SHA-256 checksum →
+AES-256-GCM envelope encryption → R2 `PutObject` → `party_documents` row →
+metadata response.
+
+**Failure/compensation contract (implemented + unit-tested):**
+A validation fail → nothing stored; B processing fail → nothing stored;
+C R2 fail → no DB row; D R2 ok + DB insert fail → the new R2 object is removed
+and the error rethrown; E replace upload fail → old document untouched;
+F replace created but final archive-DB-op fail → the new row AND object are
+removed again so the old active document remains the truth. A requested document
+operation always fails loudly — never silently swallowed.
+
+**Encryption** (`crypto.ts`): random 32-byte per-document DEK → encrypts the
+processed file (unique 12-byte IV; the 16-byte GCM tag and IV live as DB columns,
+NOT inside the R2 object — so ciphertext size == plaintext size) → the DEK itself
+is wrapped with the backend-only master key (`DOCUMENTS_MASTER_KEY`, base64 32
+bytes) with its own IV + tag → key_version written per document (only version 1
+exists; future keys rotate documents one version at a time). Master key/wrapped
+DEKs are never logged, never serialized into responses, never exposed to any
+frontend. Decryption re-verifies the stored SHA-256 (mismatch ⇒
+`DOCUMENT_STORAGE_CORRUPTED`).
+
+**Storage** (`storage.ts` — the only R2 client in the application):
+`@aws-sdk/client-s3` against `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`
+(path-style, region auto), private bucket `fusionone-documents`. Storage keys are
+application-generated: **`party-documents/<party-id>/<document-id>`** — unique,
+deterministic, filename-independent, traversal-safe, collision-proof.
+Fail-closed config gate (`requireDocumentStorage` + `requireDocumentEncryption`)
+on every document operation.
+
+**Config** (`config/index.ts` + `backend/.env`): `R2_ACCOUNT_ID`,
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (default
+`fusionone-documents`), `DOCUMENTS_MASTER_KEY`, `MAX_DOCUMENT_FILE_BYTES`
+(default 10 MB, enforced server-side while streaming). All server-only — none is
+a `VITE_*` var; `.env.example` documents them with placeholders. The TEST
+Cloudflare credentials are attached-task TEST credentials.
+
+**Error codes in the closed registry:** `DOCUMENT_FILE_REQUIRED`,
+`DOCUMENT_FILE_TOO_LARGE`, `DOCUMENT_FILE_TYPE_UNSUPPORTED`,
+`DOCUMENT_FILE_INVALID`, `DOCUMENT_NOT_FOUND`, `DOCUMENT_STORAGE_CORRUPTED`,
+`DOCUMENTS_NOT_CONFIGURED`, `PARTY_NOT_FOUND`.
+
+## C. Frontend
+
+- **`src/features/party-documents/api.ts`** — the single access path:
+  authenticated `fetch` calls to the backend routes (never the browser Supabase
+  client for documents); TanStack Query hooks `usePartyDocuments` /
+  `useUploadPartyDocument` / `useReplacePartyDocument` / `useArchivePartyDocument`
+  with invalidation scoped to exactly `['party-documents', partyId]`.
+  **`fetchPartyDocumentPreview`** returns the decrypted blob for the IN-APP
+  preview dialog; `downloadPartyDocument` saves with the Content-Disposition
+  original filename. No function opens a new browser tab.
+- **`src/components/party-documents/PartyDocumentsTab.tsx`** — the **third tab**
+  ("Documents") on Party Detail: the REAL document table (Document | Type |
+  Size | Added | Status | Actions; PDF/image icons; active/archived badges;
+  archived rows dimmed), proper loading skeleton / error + retry / empty state
+  ("No documents added yet." + guidance + Add Document), counters derived from
+  the listed rows, and the actions: Preview (in-app) / Download / Replace /
+  Archive (Replace + Archive on ACTIVE rows only — **Replace exists ONLY here,
+  nowhere else in the application**).
+  **Layout contract (fixed in PDOC-FIX-1):** the tab's root element MUST stay
+  a stretching flex item + flex container (`flex min-h-0 flex-1 flex-col`,
+  fixed bands `shrink-0`) inside ListPage's bounded flex column — a plain
+  block wrapper (e.g. `space-y-3`) collapses the fill-mode DataTable card to
+  0px and silently clips every row (count renders, rows invisible). The
+  structural guard is pinned by the height-chain regression test in
+  `src/test/partyDocumentsTab.test.tsx`.
+- **`src/components/party-documents/DocumentPreviewDialog.tsx`** — the IN-APP
+  preview dialog: images (JPEG/PNG/WebP) render centered, aspect-preserved,
+  fitted to the dialog; PDFs render via the application's existing pdf.js
+  capability (the same lazy-loaded `pdfjs-dist` module the invoice viewer uses —
+  one shared copy, no second PDF implementation): multi-page stacking, scrolling,
+  zoom + fit-width controls, page indicator. Loading / error / retry states,
+  filename header, separate Download action, close control. NEVER opens a new
+  tab, never exposes R2 URLs.
+- **`src/components/parties/PartyFormModal.tsx` (Add Party)** — the ONE
+  creation-time document shortcut: an optional "Document" section
+  ("Select Document" / filename chip with remove; "JPG, PNG, WebP or PDF ·
+  Optional"). Save flow: create the party → if a document was selected, upload
+  it through the EXISTING party-document backend → invalidate the new party's
+  document list. **If the upload fails the failure is surfaced clearly**
+  ("Document Not Saved … The party was created — add the document later from
+  Party Detail → Documents"), the party REMAINS usable and is still returned to
+  the caller (e.g. New Sale auto-selects it). The Edit Party dialog has no
+  document section.
+- **Trade-In UI contains no document UI**: `NewSalePage`'s "Add Trade-In
+  Device" dialog and `ConvertProformaDialog`'s received trade-in rows carry only
+  Brand / Model / IMEI / RAM-ROM / Color / Credit Value / Original MRP. The
+  former `TradeInDocumentField` component was DELETED.
+- **`src/features/sales/mutations.ts`** — `buildTradeInPayload` maps
+  device/transaction facts only; no upload-before-sale step, no document
+  compensation logic, no `document_id` anywhere in the payload types.
+  `ResoldTradeIn` carries no document field.
+- **`src/pages/exchange/ExchangePage.tsx`** — transaction columns only
+  (Device / IMEI / Credit / MRP / Discount / Linked Sale / Status); the DOC
+  column, View button and document projection were removed from the UI AND the
+  underlying query. Exchange contains no document concept.
+- **Invoice paths (`src/features/invoice/*`, `backend/src/documents/*`) contain
+  ZERO document references** — invoice PDFs are document-free (verified at code
+  level AND at byte level — decompressed PDF streams scanned during E2E).
+
+## D. Tests (all green on the final schema)
+
+- **Backend** (`backend/tests/party-documents.test.ts`, mocked infra): upload
+  success, unsupported MIME, invalid content, oversize, image processing, PDF
+  validation, encryption/decryption round-trip, R2 failure, DB-failure-after-R2
+  compensation, Cases D/E/F, replace target rules, archive idempotence,
+  wrong-party not-found, preview/download integrity, corruption detection,
+  historical archived access. Full backend suite 48/48 + typecheck clean.
+- **Database** (`database/tools/party-documents-tests.ts`, isolated FY-2032
+  fixtures, self-cleaning): entity creation/defaults/unique storage key, party
+  ownership, archive semantics, **trade_ins has no document column of any kind
+  (schema-level rejection of a document column)**, **create_sale ignores
+  document data in the trade-in payload (no validation, no persistence, no
+  rejection)**, trade-in invariants intact, **cancel_sale resold[] carries no
+  document data**, cancellation never deletes/archives a party document,
+  message_jobs safety. 24/24.
+- **Frontend**: `src/test/partyDocumentsTab.test.tsx` (real document rows +
+  metadata columns, counters match list contents, empty/loading/error-adjacent
+  states, in-app preview dialog — asserted `window.open` NOT called —, image
+  preview, PDF preview via mocked pdf.js, Download separate from Preview,
+  Replace/Archive lifecycle rules, archive confirmation),
+  `src/test/partyFormModal.test.tsx` (optional document section, selection +
+  removal, creation without a document unchanged, upload through the existing
+  backend for the NEW party id, upload-failure surfaced with the party kept
+  usable, Edit Party has no document section),
+  `src/test/tradeInDialogsNoDocument.test.tsx` (New Sale trade-in dialog AND
+  proforma conversion rows contain only device/transaction fields — no document
+  field, no file input, no upload button),
+  `src/test/exchangeNoDocument.test.tsx` (no DOC column / no View button / the
+  Supabase projection itself carries no document field). Full vitest suite
+  263/263 + typecheck clean.
+- **E2E on TEST (browser, agent-browser):** Documents tab renders the real
+  record row (name/type/size/added/status + counters matching); in-app image
+  preview dialog (title = filename, image rendered at natural resolution,
+  Download + Close actions, zero new tabs); row menu Download/Replace/Archive
+  (active) with the Replace picker and the Archive confirmation dialog; the
+  **Add Party + optional initial document flow end-to-end** (party created →
+  POST to the party-documents backend route 201 → document row present on the
+  party's Documents tab → preview works → New Sale auto-selected the new party);
+  Exchange shows exactly the seven transaction columns with no document UI; the
+  New Sale trade-in dialog contains only the seven device/transaction fields.
+  The E2E fixture was fully cleaned (party row + cascaded document row + R2
+  object; 0 leftovers under the party prefix).
+- **Regression sweep on the final schema:** backend 48/48 + tsc clean; frontend
+  263/263 + tsc clean; DB suites tradein-proforma 121/121, validation-search
+  135/135, party-documents 24/24. Known pre-existing limitation (unchanged,
+  documented in worklog FINDING 4): `message-tests.ts` cannot run because its
+  fixtures hardcode June-2026 dates inside the FY closed by the earlier
+  FY-lifecycle E2E (fixture/calendar coupling — not an app defect; the message
+  system itself is untouched and `message_jobs = 0` throughout). `bun run lint`
+  fails repo-wide with "ESLint couldn't find an eslint.config.*" — pre-existing
+  (no ESLint config was ever committed; tsc + vitest are the working gates).
+
+## E. TEST environment state (verified at completion)
+
+- Schema: `party_documents` live; `trade_ins` has NO document column (0018);
+  `document_url` dropped (0017); `documents` bucket + policies gone;
+  `store_assets` intact. Migrations 0016–0018 registered in `schema_migrations`.
+- R2 ↔ DB consistency: **bidirectional 1:1** (2 rows ↔ 2 objects — both are the
+  owner's own uploads through the preview panel during their own verification;
+  intentionally preserved, not test artifacts).
+- Business baseline: parties 4, sales 9, purchases 7, trade_ins 4, inventory
+  15, `message_jobs` 0 (WhatsApp never paired, IDLE throughout — the refactor
+  E2E created and fully removed exactly one party + one document + one R2
+  object; baseline identical before and after).
+
+## F. Production promotion notes (NOT performed)
+
+- Production schema promotion = apply 0016 → 0017 → 0018 in order (0017's header
+  documents the pre-check: verify the production `documents` bucket is empty or
+  migrate its objects into R2 first; the bucket itself must be removed via the
+  Storage API, not SQL).
+- Production needs its own `DOCUMENTS_MASTER_KEY` (generated once, base64 of 32
+  bytes) and its own R2 bucket + credentials; TEST credentials must never be
+  reused.
+- No production resource was accessed, inspected, or changed by this work.

@@ -115,7 +115,6 @@ export function ConvertProformaDialog({
       color: '',
       credit_value: String(Number(ti.rate) || 0),
       mrp: '',
-      file: null,
     })),
   );
 
@@ -154,6 +153,11 @@ export function ConvertProformaDialog({
 
   const selectedBank = bankAccounts.find((b) => b.id === bankAccountId);
   const applicableModes = paymentModes.filter((m) => m.bank_account_id === bankAccountId);
+  // A non-cash account with NO configured payment modes: the required mode
+  // dropdown would otherwise have nothing to select — guide the user to add
+  // one (the guidance is also the submit error, never "Select a payment
+  // mode." with an empty list).
+  const noModesAvailable = !!selectedBank && !selectedBank.is_cash && applicableModes.length === 0;
 
   const pickFulfillment = (proformaItemId: string, row: InventorySearchRow) =>
     setFulfillments((prev) =>
@@ -450,16 +454,6 @@ export function ConvertProformaDialog({
                     className="h-9 text-xs"
                   />
                 </Field>
-                <Field label="Identity / Declaration Doc (Optional)" className="sm:col-span-2 pt-1">
-                  <input
-                    type="file"
-                    accept="image/*,.pdf"
-                    onChange={(e) => {
-                      if (e.target.files?.[0]) updateTradeIn(ti.id, { file: e.target.files[0] });
-                    }}
-                    className="text-xs text-slate-600 block w-full max-w-[250px]"
-                  />
-                </Field>
               </div>
             </div>
             );
@@ -479,7 +473,6 @@ export function ConvertProformaDialog({
                   color: '',
                   credit_value: '',
                   mrp: '',
-                  file: null,
                 },
               ])
             }
@@ -540,7 +533,14 @@ export function ConvertProformaDialog({
             />
           </Field>
           {selectedBank && !selectedBank.is_cash && (
-            <Field label="Payment Mode" required error={fieldErrors.show('mode', nPaid > 0 && !paymentModeId ? 'Select a payment mode.' : null)}>
+            <Field
+              label="Payment Mode"
+              required
+              hint={noModesAvailable ? 'Add a payment mode to this account first.' : undefined}
+              error={fieldErrors.show('mode', nPaid > 0 && !paymentModeId
+                ? (noModesAvailable ? 'Add a payment mode to this account first.' : 'Select a payment mode.')
+                : null)}
+            >
               <Select
                 value={paymentModeId}
                 onChange={setPaymentModeId}

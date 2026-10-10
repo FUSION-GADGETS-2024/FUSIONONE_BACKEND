@@ -15,47 +15,11 @@ import {
   History,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
+import { Amount } from '@/components/ui/Amount';
 import { cn } from '@/components/ui/utils';
 import { useSkeletonDelay } from '@/components/ui/Skeleton';
 
 
-
-// Splits number and Rs. suffix into separate spans so each can carry its own
-// weight/color. tabular-nums prevents reflow on number changes.
-
-function Amount({
-  value,
-  size = 'md',
-  dim = false,
-}: {
-  value: number;
-  size?: 'sm' | 'md' | 'lg';
-  dim?: boolean;
-}) {
-  const formatted = value.toLocaleString('en-IN', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-  const dotIdx = formatted.lastIndexOf('.');
-  const whole = formatted.slice(0, dotIdx);
-  const dec = formatted.slice(dotIdx + 1);
-
-  const sz = {
-    sm: { symbol: 'text-[11px]', whole: 'text-sm',  dec: 'text-[11px]' },
-    md: { symbol: 'text-sm',     whole: 'text-xl',  dec: 'text-sm'     },
-    lg: { symbol: 'text-[15px]', whole: 'text-[26px] leading-none', dec: 'text-[15px]' },
-  }[size];
-
-  return (
-    <span className={cn('inline-flex items-baseline gap-[1px] tabular-nums select-none', dim ? 'opacity-35' : '')}>
-      <span className={cn(sz.whole, 'font-semibold text-slate-900 tracking-tight')}>{whole}</span>
-      <span className={cn(sz.dec, 'font-normal text-slate-400')}>
-        <span className="text-slate-300">.</span>{dec}
-      </span>
-      <span className={cn(sz.symbol, 'font-normal text-slate-500 ml-px')}>Rs.</span>
-    </span>
-  );
-}
 
 // ─── MetricCard ───────────────────────────────────────────────────────────────
 
@@ -284,7 +248,7 @@ function Skeleton({ pulsing }: { pulsing: boolean }) {
 export default function DashboardPage() {
   const { selectedYear, isReadOnly, isLoading: fyLoading } = useFinancialYear();
 
-  const dashboardQuery = useDashboardData(selectedYear, isReadOnly, fyLoading);
+  const dashboardQuery = useDashboardData(selectedYear, fyLoading);
 
   // Loading threshold: the skeleton geometry renders immediately, its
   // shimmer only starts if the wait becomes noticeable. Never delays data.

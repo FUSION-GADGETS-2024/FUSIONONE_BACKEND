@@ -11,6 +11,7 @@ import Fastify, {
   type FastifyReply,
 } from 'fastify';
 import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
 import { timingSafeEqual } from 'node:crypto';
 import { getConfig } from '../config/index.js';
 import { getLogger } from '../logging/logger.js';
@@ -19,6 +20,7 @@ import { getSSEManager } from './sse.js';
 import { authHook } from './auth.js';
 import { requireAuthorizedUser, requireOwner } from './authorize.js';
 import { registerUserRoutes } from './users.js';
+import { registerPartyDocumentRoutes } from '../party-documents/routes.js';
 import { AppError, ErrorCode, toAppError } from '../errors/registry.js';
 import { WhatsAppState } from '../state/whatsapp-states.js';
 import { parseSendInvoiceRequest } from '../messages/schema.js';
@@ -94,6 +96,19 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
   });
 
   app.addHook('preHandler', authHook);
+
+  // Multipart parsing for the party-document upload routes. The precise
+  // per-file size enforcement happens while the stream is read
+  // (party-documents/routes.ts readMultipartFile); the plugin limit is a
+  // coarse safety net above it (the JSON bodyLimit does not apply to
+  // multipart streams).
+  await app.register(multipart, {
+    attachFieldsToBody: false,
+    limits: {
+      files: 1,
+      fileSize: cfg.maxDocumentFileBytes * 2,
+    },
+  });
 
   // Bodyless API calls: several endpoints (block/unblock/reset/remove) take
   // their target from the URL and their actor from the JWT — an empty body
@@ -559,6 +574,10 @@ export async function createServer(deps: ServerDeps): Promise<FastifyInstance> {
 
   // User management (owner-only) — list + invite.
   registerUserRoutes(app);
+
+  // Party documents — the party-scoped document surface (R2 private +
+  // application-level encryption; the browser never touches storage).
+  await registerPartyDocumentRoutes(app);
 
   app.setNotFoundHandler((_req: FastifyRequest, reply: FastifyReply) => {
     const notFound = new AppError(ErrorCode.API_NOT_FOUND);
