@@ -34,3 +34,13 @@ skills/
 
 # local sandbox credentials - contains live secrets, never commit
 DEV_CREDENTIALS.md
+
+# build artifacts / generated reports
+tsconfig.tsbuildinfo
+.wrangler/
+download/
+
+# build artifacts / generated reports
+tsconfig.tsbuildinfo
+.wrangler/
+download/
