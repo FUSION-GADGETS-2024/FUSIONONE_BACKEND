@@ -1,53 +1,41 @@
 {
-  "name": "fusion-one",
-  "version": "4.0.0",
+  "name": "fusionone-backend",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
+  "description": "FUSION ONE Backend — production application backend (WhatsApp delivery, invoices, user management, Supabase integration)",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "lint": "eslint .",
+    "dev": "bun --hot src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "deploy:pages": "node scripts/deploy-pages.mjs"
+    "lint": "tsc --noEmit",
+    "db:push": "echo \"[db:push] No Prisma database in this project (the FUSION ONE backend uses file-based Baileys auth state).\"",
+    "test": "bun test"
   },
   "dependencies": {
-    "@fontsource/roboto": "^5.2.5",
-    "@supabase/ssr": "^0.12.4",
-    "@supabase/supabase-js": "^2.112.3",
-    "@tanstack/react-query": "^5.101.4",
-    "clsx": "^2.1.1",
-    "exceljs": "^4.4.0",
-    "fflate": "^0.8.3",
-    "lucide-react": "^1.31.0",
-    "pdfjs-dist": "^6.3.289",
+    "@aws-sdk/client-s3": "^3.1147.0",
+    "@fastify/cors": "^11.3.0",
+    "@fastify/multipart": "^10.1.2",
+    "@napi-rs/canvas": "0.1.68",
+    "@supabase/supabase-js": "^2.117.2",
+    "@whiskeysockets/baileys": "^6.7.18",
+    "fastify": "^5.2.1",
+    "jose": "5.9.6",
     "pdfkit": "^0.20.2",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "react-router": "^7.1.0",
-    "tailwind-merge": "^3.6.0"
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0",
+    "qrcode": "^1.5.4",
+    "redis": "^6.3.0",
+    "typescript": "^5.7.2",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.3.0",
-    "@testing-library/dom": "^10.4.2",
-    "@testing-library/react": "^16.3.3",
-    "@testing-library/user-event": "^14.6.7",
-    "@types/node": "^25",
+    "@types/node": "^22.10.0",
     "@types/pdfkit": "^0.17.6",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "@vitejs/plugin-react": "^5.0.0",
-    "eslint": "^10.4.1",
-    "eslint-plugin-react-hooks": "^5.2.0",
-    "eslint-plugin-react-refresh": "^0.4.16",
-    "globals": "^16.0.0",
-    "jsdom": "^30.1.1",
-    "tailwindcss": "^4.3.0",
-    "typescript": "~6.0.3",
-    "typescript-eslint": "^8.20.0",
-    "vite": "^7.1.0",
-    "vitest": "^5.0.2"
-  }
+    "@types/qrcode": "^1.5.5"
+  },
+  "trustedDependencies": [
+    "protobufjs"
+  ]
 }
